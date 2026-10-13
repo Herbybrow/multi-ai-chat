@@ -32,7 +32,10 @@ export interface ContentScriptConfig {
   sendButtonFilter?: (element: Element) => boolean;
   userMessageSelectors?: string[];
   userMessageTracking?: 'element-identity' | 'semantic-count';
-  sendConfirmation?: 'heuristic' | 'matching-user-message';
+  sendConfirmation?: 'heuristic' | 'matching-user-message' | 'single-activation';
+  readInputText?: (element: Element) => string;
+  inputMatchesPrompt?: (element: Element, text: string) => boolean;
+  preserveExistingDraft?: boolean;
   requireSameComposerForClearConfirmation?: boolean;
   responseSelectors: string[];
   responseTracking?: 'element-identity' | 'semantic-latest';
@@ -48,7 +51,7 @@ export interface ContentScriptConfig {
   // Some providers keep their busy/Stop signal active throughout answer streaming.
   // Allow chunks while that signal still prevents premature completion.
   streamWhileThinking?: boolean;
-  injectInput?: (element: Element, text: string) => void | Promise<void>;
+  injectInput?: (element: Element, text: string, isActive?: () => boolean) => void | Promise<void>;
   doneDelay?: number;
   chunkDebounce?: number;
 }
@@ -111,6 +114,7 @@ export function createContentScript(config: ContentScriptConfig): void {
     responseContentRoot = (response) => response,
     userMessageTracking = 'element-identity',
     sendConfirmation = 'heuristic',
+    preserveExistingDraft = false,
     loginDetector,
     loggedOutDetector = () => false,
     loginLossDelay = 0,
@@ -147,6 +151,7 @@ export function createContentScript(config: ContentScriptConfig): void {
   let responseGeneration = 0;
   let failedRequestTombstone: SettledRequestIdentity | undefined;
   let sendDispatched = false;
+  let thinkingAtRequestStart = false;
   let cancelledRequestCleanup: CancelledRequestCleanup | undefined;
   const sendTimeouts = new Set<number>();
 
@@ -156,11 +161,20 @@ export function createContentScript(config: ContentScriptConfig): void {
     requireVisibleInput,
     inputFilter,
   );
-  const inputTextMatches = (input: Element, text: string): boolean => (
-    sendConfirmation === 'matching-user-message'
-      ? composerTextExactlyMatches(input, text)
-      : composerTextMatches(input, text)
-  );
+  const readInputText = config.readInputText
+    ?? (sendConfirmation === 'heuristic' ? getInputText : getExactInputText);
+  const inputTextMatches = config.inputMatchesPrompt ?? ((input: Element, text: string): boolean => {
+    const actual = readInputText(input);
+    const normalize = sendConfirmation === 'heuristic' && !preserveExistingDraft
+      ? (value: string) => value.replace(/\s+/g, '')
+      : (value: string) => value.replace(/\r\n?/g, '\n');
+    return normalize(actual) === normalize(text);
+  });
+
+  function assertInputLanded(input: Element, expected: string): void {
+    if (!readInputText(input).trim()) throw new Error('editor remained empty');
+    if (!inputTextMatches(input, expected)) throw new Error('editor text did not match the requested prompt');
+  }
 
   function isContextValid(): boolean {
     if (disposed || scope[marker] !== runtimeState) return false;
@@ -230,6 +244,9 @@ export function createContentScript(config: ContentScriptConfig): void {
   async function sendMessage(text: string, requestId?: string, workflowId?: string): Promise<void> {
     if (!text.trim()) throw new Error(encodeError('error.empty_message'));
     if (waitingForResponse) throw new Error(encodeError('error.response_in_progress', { provider }));
+    if (sendConfirmation === 'single-activation' && isThinking()) {
+      throw new Error(encodeError('error.response_in_progress', { provider }));
+    }
 
     // Reserve ownership before the first await so lookup is cancellable and concurrent
     // commands cannot both enter this provider's editor.
@@ -259,6 +276,7 @@ export function createContentScript(config: ContentScriptConfig): void {
     sawGenerationActivity = false;
     responseWaitStartedAt = Date.now();
     activePromptText = text;
+    thinkingAtRequestStart = isThinking();
     lastActivatedInput = undefined;
     startResponsePolling();
 
@@ -269,7 +287,12 @@ export function createContentScript(config: ContentScriptConfig): void {
       finishWithError(reason, requestId, workflowId, generation);
       throw new Error(reason);
     }
-    if (sendConfirmation === 'matching-user-message' && getInputText(input).trim()
+    if (sendConfirmation === 'single-activation' && isThinking()) {
+      const reason = encodeError('error.response_in_progress', { provider });
+      finishWithError(reason, requestId, workflowId, generation);
+      throw new Error(reason);
+    }
+    if ((preserveExistingDraft || sendConfirmation === 'matching-user-message') && readInputText(input).trim()
       && !inputTextMatches(input, text)) {
       const reason = encodeError('error.existing_draft', { provider });
       finishWithError(reason, requestId, workflowId, generation);
@@ -279,12 +302,12 @@ export function createContentScript(config: ContentScriptConfig): void {
     const injectionStartedAt = Date.now();
     try {
       if (!isActiveRequest(requestId, generation)) throw new Error('request cancelled before input injection');
-      if (sendConfirmation !== 'matching-user-message' || !inputTextMatches(input, text)) {
-        await injectInput(input, text);
+      if ((sendConfirmation === 'heuristic' && !preserveExistingDraft) || !inputTextMatches(input, text)) {
+        await injectInput(input, text, () => isActiveRequest(requestId, generation));
       }
       await Promise.resolve();
       if (!isActiveRequest(requestId, generation)) throw new Error('request cancelled during input injection');
-      assertInputLanded(input, text, sendConfirmation === 'matching-user-message');
+      assertInputLanded(input, text);
     } catch (error) {
       finishWithError(encodeError('error.input_injection_failed', { provider, detail: errorMessage(error) }), requestId, workflowId, generation);
       throw error;
@@ -295,14 +318,14 @@ export function createContentScript(config: ContentScriptConfig): void {
       void (async () => {
         const firstAttempt = await activateSend(text, requestId, generation);
         if (!isActiveRequest(requestId, generation)) return;
-        if (sendConfirmation === 'matching-user-message') {
+        if (sendConfirmation !== 'heuristic') {
           if (!firstAttempt.ok) {
             finishWithError(encodeError(firstAttempt.errorKey ?? 'error.send_failed', {
               provider, ...(firstAttempt.detail ? { detail: firstAttempt.detail } : {}),
             }), requestId, workflowId, generation);
             return;
           }
-          // A dispatched click is uncertain until the provider renders our user turn.
+          // A dispatched click is uncertain until there is positive current-turn evidence.
           // Never refill or activate again while an earlier action may still be accepted.
           scheduleForRequest(() => {
             if (sendStarted()) return;
@@ -383,8 +406,10 @@ export function createContentScript(config: ContentScriptConfig): void {
     } catch (error) {
       const detail = errorMessage(error);
       return { ok: false, path: 'enter-key', detail,
-        errorKey: sendConfirmation === 'matching-user-message' && detail === 'live editor contains different text'
-          ? 'error.existing_draft' : undefined };
+        errorKey: (preserveExistingDraft || sendConfirmation !== 'heuristic') && detail === 'live editor contains different text'
+          ? 'error.existing_draft'
+          : sendConfirmation === 'single-activation' && detail === 'verified editor no longer contains the requested prompt'
+            ? 'error.input_injection_failed' : undefined };
     }
     if (!input) return { ok: false, path: 'enter-key', detail: 'input disappeared' };
     lastActivatedInput = input;
@@ -394,13 +419,25 @@ export function createContentScript(config: ContentScriptConfig): void {
       () => isActiveRequest(requestId, generation),
     );
     if (!isActiveRequest(requestId, generation)) return { ok: false, path: 'enter-key', detail: 'request cancelled' };
-    if (sendConfirmation === 'matching-user-message') {
+    if (sendConfirmation !== 'heuristic') {
       if (sendStarted()) return { ok: true, path: 'button-click' };
       if (queryInput() !== input || !inputTextMatches(input, text)) {
         return { ok: false, path: 'button-click', errorKey: 'error.send_unconfirmed' };
       }
       if (!sendButton) return { ok: false, path: 'button-click', errorKey: 'error.send_action_unavailable' };
       if (isDisabled(sendButton)) return { ok: false, path: 'button-click', errorKey: 'error.send_action_disabled' };
+      if (sendConfirmation === 'single-activation') {
+        if (isThinking()) return { ok: false, path: 'button-click', errorKey: 'error.response_in_progress' };
+        // Ignore any orphan turns that appeared during lookup or editor insertion.
+        // Capture the actual current page immediately before our own dispatch.
+        responseBaselineEls = new Set(queryResponses());
+        semanticResponseBaseline = captureSemanticResponseBaseline(querySemanticResponses(), extractResponseText);
+        userMessageBaselineEls = new Set(queryUserMessages());
+        matchingUserMessageBaselineCount = matchingPromptCount(Array.from(userMessageBaselineEls, userMessageText), text);
+        sawMatchingUserMessage = false;
+        matchingUserMessageElement = undefined;
+        responseWaitStartedAt = Date.now();
+      }
       sendDispatched = true;
       const ok = clickElement(sendButton);
       return { ok, path: 'button-click', detail: ok ? undefined : 'send control could not be activated' };
@@ -423,12 +460,15 @@ export function createContentScript(config: ContentScriptConfig): void {
     );
     if (!input || !isActiveRequest(requestId, generation)) return null;
     if (inputTextMatches(input, text)) return input;
-    if (getInputText(input).trim()) throw new Error('live editor contains different text');
+    if (readInputText(input).trim()) throw new Error('live editor contains different text');
+    if (sendConfirmation === 'single-activation') {
+      throw new Error('verified editor no longer contains the requested prompt');
+    }
     if (!isActiveRequest(requestId, generation)) return null;
-    await injectInput(input, text);
+    await injectInput(input, text, () => isActiveRequest(requestId, generation));
     await Promise.resolve();
     if (!isActiveRequest(requestId, generation)) return null;
-    assertInputLanded(input, text, sendConfirmation === 'matching-user-message');
+    assertInputLanded(input, text);
     return input;
   }
 
@@ -489,6 +529,16 @@ export function createContentScript(config: ContentScriptConfig): void {
       }
       return accepted;
     }
+    if (sendConfirmation === 'single-activation') {
+      if (!sendDispatched) return false;
+      const hasCurrentResponse = responseTracking === 'semantic-latest'
+        ? Boolean(getLatestResponseText())
+        : queryResponses().some((element) => !responseBaselineEls.has(element));
+      const accepted = hasNewMatchingUserMessage() || hasCurrentResponse
+        || (sendDispatched && !thinkingAtRequestStart && isCurrentTurnThinking());
+      if (accepted) sawGenerationActivity = true;
+      return accepted;
+    }
     if (isCurrentTurnThinking()) {
       sawGenerationActivity = true;
       return true;
@@ -506,7 +556,7 @@ export function createContentScript(config: ContentScriptConfig): void {
       return true;
     }
     const input = queryInput();
-    const cleared = Boolean(input && !getInputText(input).trim());
+    const cleared = Boolean(input && !readInputText(input).trim());
     const confirmedByClear = cleared && clearedComposerConfirmsSend(
       lastActivatedInput,
       input,
@@ -518,6 +568,7 @@ export function createContentScript(config: ContentScriptConfig): void {
   }
 
   function isCurrentTurnThinking(): boolean {
+    if (sendConfirmation === 'single-activation' && !sendDispatched) return false;
     return generationSignalBelongsToCurrentTurn(
       isThinking(),
       requireMatchingUserMessageForGenerationSignals,
@@ -526,6 +577,7 @@ export function createContentScript(config: ContentScriptConfig): void {
   }
 
   function getLatestResponseText(): string | null {
+    if (sendConfirmation === 'single-activation' && !sendDispatched) return null;
     const currentTurnConfirmed = !requireMatchingUserMessageForGenerationSignals
       || hasNewMatchingUserMessage();
     if (responseTracking === 'semantic-latest') {
@@ -703,6 +755,12 @@ export function createContentScript(config: ContentScriptConfig): void {
     const stoppedRequest = waitingForResponse
       ? { requestId: activeRequestId, workflowId: activeWorkflowId, dispatched: sendDispatched }
       : failedRequestTombstone;
+    if (sendConfirmation === 'single-activation' && stoppedRequest?.dispatched === false) {
+      // This request never activated Send. A visible Stop belongs to another turn.
+      resetResponseState();
+      failedRequestTombstone = undefined;
+      return true;
+    }
     const stopButton = queryFirst(
       config.stopButtonSelectors ?? [],
       document,
@@ -711,7 +769,7 @@ export function createContentScript(config: ContentScriptConfig): void {
     );
     const stopActivated = Boolean(stopButton && clickElement(stopButton));
     resetResponseState();
-    failedRequestTombstone = sendConfirmation === 'matching-user-message' && stoppedRequest?.dispatched
+    failedRequestTombstone = sendConfirmation !== 'heuristic' && stoppedRequest?.dispatched
       ? stoppedRequest : undefined;
     if (failedRequestTombstone) {
       cancelledRequestCleanup = {
@@ -893,19 +951,9 @@ function getInputText(input: Element): string {
   return input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement ? input.value : input.textContent ?? '';
 }
 
-function assertInputLanded(input: Element, expected: string, exact = false): void {
-  const actual = getInputText(input);
-  if (!actual.trim()) throw new Error('editor remained empty');
-  if (!(exact ? composerTextExactlyMatches(input, expected) : composerTextMatches(input, expected))) {
-    throw new Error('editor text did not match the requested prompt');
-  }
-}
-
-function composerTextExactlyMatches(input: Element, expected: string): boolean {
-  const actual = input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement
+function getExactInputText(input: Element): string {
+  return input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement
     ? input.value : (input as HTMLElement).innerText || input.textContent || '';
-  const normalizeLineEndings = (value: string) => value.replace(/\r\n?/g, '\n');
-  return normalizeLineEndings(actual) === normalizeLineEndings(expected);
 }
 
 function composerTextMatches(input: Element, expected: string): boolean {

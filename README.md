@@ -56,6 +56,8 @@ The interface language is separate from the requested answer language. Workflow 
 
 Grok submission requires a matching new user message on the provider page. If acceptance cannot be confirmed, check that conversation before choosing Retry: an uncertain send may already have reached the provider. The extension does not automatically repeat an uncertain send, overwrite a different existing draft, or bypass provider usage limits.
 
+Gemini uses the editor's plain-text paste handler and verifies the full prompt, including line breaks and significant whitespace, before one Send activation. A different draft, editor rollback, disabled Send, or uncertain acceptance stops the turn for recovery. It does not patch editor-owned DOM or repeat an ambiguous send.
+
 ## Install
 
 ### Chrome Web Store (recommended)
