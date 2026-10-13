@@ -83,6 +83,19 @@ export interface WorkflowStatusPayload {
 
 export type StepRecoveryAction = 'retry' | 'skip' | 'cancel';
 
+// This is deliberately a small, sanitized classification. It is safe to show in
+// the side panel and lets recovery diagnostics identify the failed stage without
+// serializing prompts, provider responses, or browser-session data.
+export type ProviderFailureKind =
+  | 'prompt_insertion'
+  | 'submission'
+  | 'response_timeout'
+  | 'response_extraction'
+  | 'authentication'
+  | 'quota_or_rate_limit'
+  | 'navigation'
+  | 'unexpected';
+
 export interface StepRecoveryRequest {
   recoveryId: string;
   workflowId: string;
@@ -91,6 +104,7 @@ export interface StepRecoveryRequest {
   provider: AIProvider;
   failedRequestId: string;
   reason: string;
+  failureKind?: ProviderFailureKind;
 }
 
 export interface StepRecoveryDecision {
@@ -122,6 +136,7 @@ export type MessageAction =
   | 'WORKFLOW_STATUS'
   | 'ROLE_ASSIGNMENT'
   | 'STEP_RECOVERY_REQUIRED'
+  | 'STEP_RECOVERY_PRESENTED'
   | 'RESOLVE_STEP_RECOVERY'
   | 'CANCEL_WORKFLOW'
   | 'STOP_GENERATION'

@@ -42,6 +42,7 @@ export interface RoundtableHistoryItem {
 interface PendingRecovery {
   token: object;
   request: StepRecoveryRequest;
+  presented: boolean;
   resolve: (action: StepRecoveryAction) => void;
   reject: (reason: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -63,18 +64,21 @@ export class StepRecoveryCoordinator {
   waitForDecision(
     request: Omit<StepRecoveryRequest, 'recoveryId'>,
     notify: (request: StepRecoveryRequest) => void,
-    timeoutReason: Error = new Error('Step recovery decision timed out'),
+    timeoutReason: Error | ((request: StepRecoveryRequest, presented: boolean) => Error) = new Error('Step recovery decision timed out'),
   ): Promise<StepRecoveryAction> {
     this.cancel(undefined, new DOMException('Step recovery superseded', 'AbortError'));
     const recoveryRequest: StepRecoveryRequest = { ...request, recoveryId: this.createId() };
     return new Promise((resolve, reject) => {
       const token = {};
       const timer = setTimeout(() => {
-        if (this.pending?.token !== token) return;
+        const pending = this.pending;
+        if (pending?.token !== token) return;
         this.pending = undefined;
-        reject(timeoutReason);
+        reject(typeof timeoutReason === 'function'
+          ? timeoutReason(pending.request, pending.presented)
+          : timeoutReason);
       }, this.timeoutMs);
-      this.pending = { token, request: recoveryRequest, resolve, reject, timer };
+      this.pending = { token, request: recoveryRequest, presented: false, resolve, reject, timer };
       try {
         notify(recoveryRequest);
       } catch (error) {
@@ -94,10 +98,20 @@ export class StepRecoveryCoordinator {
     return true;
   }
 
+  markPresented(candidate: unknown): boolean {
+    const pending = this.pending;
+    if (!pending || !isStepRecoveryRequest(candidate) || !sameRecoveryRequest(pending.request, candidate)) return false;
+    pending.presented = true;
+    return true;
+  }
+
   rebindClient(workflowId: string, sessionId: string, clientId: string): StepRecoveryRequest | undefined {
     const pending = this.pending;
     if (!pending || pending.request.workflowId !== workflowId || pending.request.sessionId !== sessionId) return undefined;
     pending.request = { ...pending.request, recoveryId: this.createId(), clientId };
+    // A different extension document must render its own controls. Do not let a
+    // receipt from the closed panel make a later timeout look acknowledged.
+    pending.presented = false;
     return { ...pending.request };
   }
 
@@ -244,6 +258,15 @@ function sameRecovery(request: StepRecoveryRequest, decision: StepRecoveryDecisi
     && request.failedRequestId === decision.failedRequestId;
 }
 
+function sameRecoveryRequest(request: StepRecoveryRequest, candidate: StepRecoveryRequest): boolean {
+  return request.recoveryId === candidate.recoveryId
+    && request.workflowId === candidate.workflowId
+    && request.sessionId === candidate.sessionId
+    && request.clientId === candidate.clientId
+    && request.provider === candidate.provider
+    && request.failedRequestId === candidate.failedRequestId;
+}
+
 function isRecoveryAction(action: unknown): action is StepRecoveryAction {
   return action === 'retry' || action === 'skip' || action === 'cancel';
 }
@@ -258,6 +281,18 @@ export function isStepRecoveryDecision(value: unknown): value is StepRecoveryDec
     && isProvider(decision.provider)
     && typeof decision.failedRequestId === 'string'
     && isRecoveryAction(decision.action);
+}
+
+function isStepRecoveryRequest(value: unknown): value is StepRecoveryRequest {
+  if (!value || typeof value !== 'object') return false;
+  const request = value as Partial<StepRecoveryRequest>;
+  return typeof request.recoveryId === 'string'
+    && typeof request.workflowId === 'string'
+    && typeof request.sessionId === 'string'
+    && typeof request.clientId === 'string'
+    && isProvider(request.provider)
+    && typeof request.failedRequestId === 'string'
+    && typeof request.reason === 'string';
 }
 
 function isProvider(value: unknown): value is AIProvider {

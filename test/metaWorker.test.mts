@@ -1443,6 +1443,23 @@ test('panel reconnect during Meta recovery rotates the decision identity', async
   assert.equal(app.sent.length, 20);
 });
 
+test('only the current panel can acknowledge a scoped recovery prompt', async (t) => {
+  const app = worker({ standbyProvider: 'grok' }, false);
+  t.after(app.close);
+  await app.ready;
+  const running = app.send('roundtable', undefined, { roles: META_ROUNDTABLE });
+  await waitUntil(() => app.sent.length === 1, 'Meta recovery receipt setup');
+  app.fail(app.sent[0]);
+  await waitUntil(() => app.broadcasts.some((message) => message.action === 'STEP_RECOVERY_REQUIRED'), 'Meta recovery receipt');
+  const recovery = app.broadcasts.find((message) => message.action === 'STEP_RECOVERY_REQUIRED')!.payload;
+  assert.equal((await app.command({
+    action: 'STEP_RECOVERY_PRESENTED', payload: { ...recovery, clientId: 'stale-panel' },
+  })).ok, false);
+  assert.equal((await app.command({ action: 'STEP_RECOVERY_PRESENTED', payload: recovery })).ok, true);
+  assert.equal((await app.command({ action: 'RESOLVE_STEP_RECOVERY', payload: { ...recovery, action: 'skip' } })).ok, true);
+  await completeRemaining(app, running);
+});
+
 async function flushWorkerTurns(): Promise<void> {
   for (let turn = 0; turn < 8; turn += 1) {
     await new Promise((resolve) => setImmediate(resolve));

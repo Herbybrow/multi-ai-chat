@@ -296,13 +296,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!hydrated || !activeConversationId) return;
-    chrome.runtime.sendMessage({ action: 'GET_CONNECTIONS', payload: { clientId: clientIdRef.current, sessionId: activeConversationId } }, (response) => {
-      if (response) setConnections(response as Record<AIProvider, AIConnection>);
-    });
-  }, [activeConversationId, hydrated]);
-
-  useEffect(() => {
     let stopped = false;
     let port: chrome.runtime.Port | undefined;
     let reconnectTimer: number | undefined;
@@ -387,6 +380,13 @@ export default function App() {
           resolvingRecoveryRef.current = false;
           setIsResolvingRecovery(false);
           setIsProcessing(true);
+          // Confirm on the next paint, after the alert and its actions can be
+          // rendered. The worker can then tell an unanswered visible choice
+          // from a recovery request that never reached a side-panel document.
+          window.requestAnimationFrame(() => {
+            if (stepRecoveryRef.current?.recoveryId !== recovery.recoveryId) return;
+            void chrome.runtime.sendMessage({ action: 'STEP_RECOVERY_PRESENTED', payload: recovery }).catch(() => {});
+          });
           break;
         }
         case 'WORKFLOW_STATUS': {
@@ -435,6 +435,16 @@ export default function App() {
     chrome.runtime.onMessage.addListener(listener);
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, [applyProviderSelection]);
+
+  useEffect(() => {
+    if (!hydrated || !activeConversationId) return;
+    // The message listener above must be installed before this asks the worker
+    // to replay a pending recovery. Otherwise an immediately replayed message
+    // can be dropped during a side-panel remount.
+    chrome.runtime.sendMessage({ action: 'GET_CONNECTIONS', payload: { clientId: clientIdRef.current, sessionId: activeConversationId } }, (response) => {
+      if (response) setConnections(response as Record<AIProvider, AIConnection>);
+    });
+  }, [activeConversationId, hydrated]);
 
   useEffect(() => {
     if (!hydrated || !activeConversationId) return;
@@ -867,6 +877,7 @@ export default function App() {
           {stepRecovery && (
             <div role="alert" className="border-t border-amber-200 bg-amber-50 p-2.5">
               <div className="text-xs font-semibold text-amber-900">{t('recovery.title', { provider: AI_PROVIDERS[stepRecovery.provider].name })}</div>
+              {stepRecovery.failureKind && <div className="mt-1 text-[11px] font-medium text-amber-900">{t(`recovery.failure.${stepRecovery.failureKind}`)}</div>}
               <div className="mt-1 break-words text-[11px] leading-relaxed text-amber-800">{humanizeError(stepRecovery.reason)}</div>
               <div className="mt-2 flex flex-wrap gap-1.5">
                 <button type="button" disabled={isResolvingRecovery} onClick={() => void resolveStepRecovery('retry')} className="rounded-lg bg-sky-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-800 disabled:opacity-50">{t('recovery.retry')}</button>

@@ -34,9 +34,11 @@ function installChromeDouble({ seed, initialConnections }) {
     }
     return Promise.resolve().then(perform);
   };
+  const pendingRecovery = JSON.parse(localStorage.getItem('readiness-fixture-recovery') || 'null');
   window.readinessFixture = {
     connections: initialConnections, requests: [], scope: undefined,
     allowSend: false, sent: [],
+    pendingRecovery, presentedRecoveries: [], recoveryDecisions: [], emitted: [],
     storageCalls: [], storageHold: null,
     metaHostGranted: false, permissionRequests: [], grantPermissionRequest: false,
     pendingStorageCount: () => pendingStorage.length,
@@ -49,7 +51,7 @@ function installChromeDouble({ seed, initialConnections }) {
         else operation.resolve(operation.perform());
       }
     },
-    emit(message, sender = {}) { for (const listener of listeners) listener(message, sender); },
+    emit(message, sender = {}) { this.emitted.push(message); for (const listener of listeners) listener(message, sender); },
     emitPermissions(event, changed = {}) {
       const set = event === 'onAdded' ? permissionAdded : event === 'onRemoved' ? permissionRemoved : undefined;
       if (!set) throw new Error(`Unexpected permission event: ${event}`);
@@ -96,9 +98,26 @@ function installChromeDouble({ seed, initialConnections }) {
         if (message.action === 'GET_CONNECTIONS') {
           fixture.scope = message.payload;
           result = fixture.connections;
+          if (fixture.pendingRecovery) {
+            const recovery = fixture.pendingRecovery;
+            queueMicrotask(() => fixture.emit({
+              action: 'STEP_RECOVERY_REQUIRED',
+              provider: recovery.provider,
+              requestId: recovery.failedRequestId,
+              workflowId: recovery.workflowId,
+              payload: { ...recovery, clientId: message.payload.clientId, sessionId: message.payload.sessionId },
+            }));
+          }
         } else if (message.action === 'OPEN_LOGIN') {
           return new Promise(resolve => pending.push({ provider: message.provider, resolve }));
         } else if (message.action === 'GET_PROVIDER_URLS') result = {};
+        else if (message.action === 'STEP_RECOVERY_PRESENTED') {
+          fixture.presentedRecoveries.push(message.payload);
+          result = { ok: true };
+        } else if (message.action === 'RESOLVE_STEP_RECOVERY') {
+          fixture.recoveryDecisions.push(message.payload);
+          result = { ok: true };
+        }
         else if (message.action === 'SEND_MESSAGE' && fixture.allowSend) {
           fixture.sent.push(message.payload);
           result = { ok: true }; // Sink only: no worker, provider tab or network request.
@@ -147,7 +166,11 @@ async function run(browser) {
   };
   const saveReport = () => fs.writeFileSync(path.join(output, 'RESULTS.json'), JSON.stringify(report, null, 2) + '\n');
   saveReport();
-  for (const language of SUPPORTED_LOCALES) {
+  const fixtureLocales = process.env.READINESS_LOCALES
+    ? SUPPORTED_LOCALES.filter((locale) => process.env.READINESS_LOCALES.split(',').includes(locale))
+    : SUPPORTED_LOCALES;
+  assert.ok(fixtureLocales.length > 0, 'READINESS_LOCALES must name at least one supported locale');
+  for (const language of fixtureLocales) {
     const context = await browser.newContext({ viewport: { width: 420, height: 850 } });
     const passed = [];
     report.locales.push({ language, passed });
@@ -672,6 +695,36 @@ async function run(browser) {
       await page.getByText('⚠️ Error: Simulated workflow refusal', { exact: true }).waitFor();
       assert.equal(await page.locator('textarea').isEnabled(), true);
       passed.push('An explicit negative workflow acknowledgement displays the failure and releases the input');
+
+      // Persist a recovery before recreating the whole side-panel document. The
+      // GET_CONNECTIONS replay is emitted immediately by the Chrome double, so
+      // this verifies the listener is ready before it requests the replay and
+      // that the next-paint receipt belongs to the new panel client.
+      await page.evaluate(() => localStorage.setItem('readiness-fixture-recovery', JSON.stringify({
+        recoveryId: 'recovery-after-remount', workflowId: 'recovery-workflow',
+        provider: 'gemini', failedRequestId: 'recovery-request',
+        reason: 'i18n:{"key":"error.timeout","params":{"provider":"Gemini","seconds":600}}',
+        failureKind: 'response_timeout',
+      })));
+      await page.reload();
+      const recoveryAlert = page.getByRole('alert');
+      await recoveryAlert.waitFor();
+      const recoveryTitle = recoveryAlert.getByText(t('recovery.title', { provider: 'Gemini' }, language), { exact: true });
+      assert.equal(await recoveryTitle.count(), 1);
+      assert.equal(await recoveryAlert.getByText(label('recovery.failure.response_timeout'), { exact: true }).count(), 1);
+      await page.waitForFunction(() => window.readinessFixture.presentedRecoveries.length === 1);
+      const receipt = await page.evaluate(() => window.readinessFixture.presentedRecoveries[0]);
+      assert.equal(receipt.clientId, await page.evaluate(() => window.readinessFixture.scope.clientId));
+      assert.equal(receipt.sessionId, await page.evaluate(() => window.readinessFixture.scope.sessionId));
+      await recoveryAlert.getByRole('button', { name: label('recovery.skip'), exact: true }).click();
+      await page.waitForFunction(() => window.readinessFixture.recoveryDecisions.length === 1);
+      assert.deepEqual(await page.evaluate(() => window.readinessFixture.recoveryDecisions[0]), {
+        recoveryId: receipt.recoveryId, workflowId: receipt.workflowId,
+        sessionId: receipt.sessionId, clientId: receipt.clientId,
+        provider: receipt.provider, failedRequestId: receipt.failedRequestId,
+        action: 'skip',
+      });
+      passed.push('A pending recovery replay after a side-panel remount renders Retry/Skip/Cancel before acknowledgement, records a scoped next-paint receipt, and accepts Skip');
     } catch (error) {
       report.status = 'FAIL';
       report.errors.push(`${language}: ${error.message}`);

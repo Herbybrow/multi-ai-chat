@@ -36,6 +36,7 @@ import {
   WorkflowLifecycleRegistry,
 } from '../shared/workflowScope';
 import { assertContentScriptAccepted } from './messageDelivery';
+import { classifyProviderFailure } from './recoveryFailure';
 import {
   ProviderRequestError,
   runRecoverableWorkflowStep,
@@ -342,6 +343,12 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
 
     case 'RESOLVE_STEP_RECOVERY': {
       const accepted = !sender.tab && stepRecovery.resolve(message.payload);
+      sendResponse({ ok: accepted });
+      return true;
+    }
+
+    case 'STEP_RECOVERY_PRESENTED': {
+      const accepted = !sender.tab && stepRecovery.markPresented(message.payload);
       sendResponse({ ok: accepted });
       return true;
     }
@@ -1163,9 +1170,13 @@ function requestStepRecovery(
       provider,
       failedRequestId,
       reason: errorMessage(error),
+      failureKind: classifyProviderFailure(errorMessage(error)),
     },
     broadcastStepRecovery,
-    new Error(encodeError('error.recovery_timeout', { provider })),
+    (_request, presented) => new Error(encodeError(
+      presented ? 'error.recovery_timeout' : 'error.recovery_unavailable',
+      { provider },
+    )),
   );
 }
 
