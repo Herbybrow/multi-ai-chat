@@ -13,7 +13,6 @@ interface QueryCapableContainer {
 }
 
 export const GEMINI_INPUT_SELECTORS = [
-  '.ql-editor[contenteditable="true"]',
   'rich-textarea .ql-editor[contenteditable="true"]',
   'div[contenteditable="true"][aria-label="Enter a prompt here"]',
   '.input-area [contenteditable="true"]',
@@ -42,8 +41,9 @@ const COMPOSER_CONTAINER = 'rich-textarea, .input-area, .input-area-container, .
 
 export function isUsableGeminiComposerInput(element: GeminiControl): boolean {
   const editable = element.isContentEditable || element.getAttribute('contenteditable') === 'true';
-  const composer = element.matches('.ql-editor[contenteditable="true"]')
-    || element.getAttribute('aria-label') === 'Enter a prompt here'
+  // A Quill class alone also appears in unrelated editors. Accept the legacy
+  // labelled composer, or an editable inside one of Gemini's composer scopes.
+  const composer = element.getAttribute('aria-label') === 'Enter a prompt here'
     || Boolean(element.closest('rich-textarea, .input-area'));
   return Boolean(editable && composer && !element.disabled && !element.readOnly
     && element.getAttribute('aria-disabled') !== 'true' && element.getAttribute('aria-readonly') !== 'true'

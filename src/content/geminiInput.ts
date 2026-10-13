@@ -2,8 +2,8 @@ import { focusWithoutScroll } from './focusWithoutScroll';
 import { isUsableGeminiComposerInput, isVisibleGeminiElement } from './geminiDom';
 
 const BLOCK_TAGS = new Set(['P', 'DIV', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6']);
-const PASTE_SETTLEMENT_TIMEOUT_MS = 1000;
-const PASTE_SETTLEMENT_POLL_MS = 25;
+const INSERT_SETTLEMENT_TIMEOUT_MS = 1000;
+const INSERT_SETTLEMENT_POLL_MS = 25;
 
 export async function injectGeminiInput(
   input: Element,
@@ -15,37 +15,35 @@ export async function injectGeminiInput(
   assertNoDifferentDraft(input);
   const editor = input as HTMLElement;
   focusWithoutScroll(editor);
-  const selection = window.getSelection();
-  const range = document.createRange();
-  range.selectNodeContents(editor);
-  selection?.removeAllRanges();
-  selection?.addRange(range);
 
-  // The editor owns its selection and document model. Let it observe selection
-  // before asking its paste handler to perform one plain-text edit.
+  // Let a controlled editor settle its focus before refreshing the selection that
+  // will receive the one browser-native text edit.
   await nextTask();
   assertCurrentEditor(input, isActive);
   if (geminiComposerMatches(input, text)) return;
   assertNoDifferentDraft(input);
-  const clipboard = new DataTransfer();
-  clipboard.setData('text/plain', text);
-  editor.dispatchEvent(new ClipboardEvent('paste', {
-    clipboardData: clipboard,
-    bubbles: true,
-    cancelable: true,
-    composed: true,
-  }));
+  assertEditorFocused(editor);
+  selectEditorContents(editor);
+  assertEditorFocused(editor);
+  try {
+    if (typeof document.execCommand !== 'function') throw new Error('insertText unavailable');
+    // Do not retry with a synthetic paste, keyboard event or direct DOM mutation:
+    // one native edit plus exact readback prevents ambiguous duplicate submissions.
+    document.execCommand('insertText', false, text);
+  } catch {
+    throw new Error('native text insertion failed');
+  }
 
   // Reconciliation may take several tasks. Wait only by reading the live editor;
-  // never patch visible DOM or replay an ignored paste with another insert.
+  // never patch visible DOM or replay a failed insertion with another edit.
   await nextTask();
-  const deadline = Date.now() + PASTE_SETTLEMENT_TIMEOUT_MS;
+  const deadline = Date.now() + INSERT_SETTLEMENT_TIMEOUT_MS;
   while (true) {
     assertCurrentEditor(input, isActive);
     if (geminiComposerMatches(input, text)) return;
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error('editor text did not match the requested prompt');
-    await new Promise(resolve => setTimeout(resolve, Math.min(PASTE_SETTLEMENT_POLL_MS, remaining)));
+    await new Promise(resolve => setTimeout(resolve, Math.min(INSERT_SETTLEMENT_POLL_MS, remaining)));
   }
 }
 
@@ -82,7 +80,39 @@ function readInline(element: Element): string {
 }
 
 function assertNoDifferentDraft(input: Element): void {
-  if (readGeminiComposerText(input).trim()) throw new Error('live editor contains a different draft');
+  // Whitespace can be meaningful user input. `readGeminiComposerText` already
+  // normalizes only the editor's lone <p><br></p> placeholder to an empty value.
+  if (readGeminiComposerText(input)) throw new Error('live editor contains a different draft');
+}
+
+function assertEditorFocused(editor: HTMLElement): void {
+  const active = document.activeElement;
+  if (active !== editor && !editor.contains(active)) {
+    throw new Error('editor focus moved before insertion');
+  }
+}
+
+function selectEditorContents(editor: HTMLElement): void {
+  const selection = window.getSelection();
+  if (!selection) throw new Error('editor selection unavailable before insertion');
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  } catch {
+    throw new Error('editor selection unavailable before insertion');
+  }
+  if (selection.rangeCount !== 1) throw new Error('editor selection unavailable before insertion');
+  let selectedContainer: Node;
+  try {
+    selectedContainer = selection.getRangeAt(0).commonAncestorContainer;
+  } catch {
+    throw new Error('editor selection unavailable before insertion');
+  }
+  if (selectedContainer !== editor && !editor.contains(selectedContainer)) {
+    throw new Error('editor selection moved before insertion');
+  }
 }
 
 function assertCurrentEditor(input: Element, isActive: () => boolean): void {

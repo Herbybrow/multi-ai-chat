@@ -13,7 +13,12 @@ for (const provider of ['claude', 'gemini']) {
       visible = true;
       readOnly = false;
       getAttribute(name: string) { return name === 'contenteditable' ? 'true' : null; }
-      closest() { return this.readOnly ? this : null; }
+      closest(selector: string) {
+        if (selector.includes('[inert]')) return this.readOnly ? this : null;
+        // The current Gemini composer is a Quill editor inside rich-textarea.
+        if (provider === 'gemini' && selector.includes('rich-textarea')) return {};
+        return null;
+      }
       matches() { return true; }
       getClientRects() { return this.visible ? [{}] : []; }
     }

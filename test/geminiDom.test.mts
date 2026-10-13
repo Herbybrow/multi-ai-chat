@@ -37,10 +37,12 @@ test('Gemini input lookup skips hidden, disabled and unrelated editable elements
   const hidden = control({ qlEditor: true, visible: false });
   const disabled = control({ qlEditor: true, disabled: true });
   const unrelated = control({ ariaLabel: 'Profile bio' });
+  const unrelatedQuill = control({ qlEditor: true });
   const composer = control({ qlEditor: true, inComposer: true });
   const selected = firstAcceptedCandidate(
     GEMINI_INPUT_SELECTORS,
-    () => [hidden, disabled, unrelated, composer],
+    // An unscoped Quill editor appears before the real composer in document order.
+    () => [hidden, disabled, unrelated, unrelatedQuill, composer],
     element => element.visible && isUsableGeminiComposerInput(element),
   );
   assert.equal(selected, composer);
