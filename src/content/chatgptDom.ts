@@ -50,7 +50,7 @@ export const CHATGPT_USER_MESSAGE_SELECTORS = [
   '[data-message-author-role="user"]',
 ];
 
-const EXPLICIT_COMPOSER_SELECTOR = '[data-testid*="composer"], form[data-type="unified-composer"]';
+const EXPLICIT_COMPOSER_SELECTOR = '[data-testid*="composer"], form[data-type="unified-composer"], form[data-chatgpt-composer]';
 const COMPOSER_ACTION_SELECTOR = [
   '[data-testid="send-button"]',
   '#composer-submit-button',

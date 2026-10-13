@@ -50,6 +50,7 @@ function content(t: TestContext) {
     opacity = '1';
     proseMirror = false;
     explicitComposer = false;
+    currentComposerForm = false;
     gated = false;
     form: Control | null = null;
     children: Control[] = [];
@@ -60,6 +61,7 @@ function content(t: TestContext) {
     closest(selector: string): unknown {
       if (selector === 'form') return this.form;
       if (selector.includes('[inert]')) return this.gated || this.form?.gated ? this : null;
+      if (selector.includes('form[data-chatgpt-composer]') && this.currentComposerForm) return this;
       if (selector.includes('[data-testid*="composer"]')) return this.explicitComposer ? this : null;
       return null;
     }
@@ -140,6 +142,16 @@ function content(t: TestContext) {
       nodes.push(input);
       return input;
     },
+    markdownComposer: (options: Partial<Control> = {}) => {
+      const input = control({
+        proseMirror: true,
+        currentComposerForm: true,
+        attributes: { 'data-composer-markdown': '', role: 'textbox' },
+        ...options,
+      });
+      nodes.push(input);
+      return input;
+    },
     login: (visible = true) => nodes.push(control({ tagName: 'BUTTON', visible, attributes: { 'data-testid': 'login-button' } })),
     status: () => connection.status,
     reports: () => reports,
@@ -168,6 +180,32 @@ test('the current Open profile menu control with a usable composer reports Ready
   app.prompt();
   app.inject();
   assert.equal(app.status(), 'connected');
+});
+
+test('the current profile menu and ProseMirror inside the current composer form report Ready', t => {
+  const app = content(t);
+  app.profileMenu();
+  app.markdownComposer();
+  app.inject();
+  assert.equal(app.status(), 'connected');
+});
+
+test('a current profile menu rejects marker-only, unrelated, disabled, read-only or hidden editors', t => {
+  const cases: Array<[string, Partial<ReturnType<ReturnType<typeof content>['control']>>]> = [
+    ['marker-only editor outside the current composer form', { currentComposerForm: false }],
+    ['unrelated ProseMirror editor', { currentComposerForm: false, attributes: { role: 'textbox' } }],
+    ['disabled marked editor', { disabled: true }],
+    ['read-only marked editor', { readOnly: true }],
+    ['hidden marked editor', { visible: false }],
+  ];
+  for (const [name, options] of cases) {
+    const app = content(t);
+    app.profileMenu();
+    app.markdownComposer(options);
+    app.inject();
+    app.tick(30000);
+    assert.equal(app.status(), 'checking', name);
+  }
 });
 
 test('the current Open profile menu control without a usable composer remains Checking', t => {
