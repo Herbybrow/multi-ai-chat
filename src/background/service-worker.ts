@@ -19,6 +19,7 @@ import {
   DEFAULT_ROUNDTABLE_ROLES,
 } from '../shared/constants';
 import { questionWithConversationContext } from '../shared/conversationContinuity';
+import { appendResponseLanguagePolicy } from '../shared/promptLanguage';
 import { encodeError } from '../shared/errors';
 import { getProviderReadiness } from '../shared/providerReadiness';
 import { getProviderFromUrl } from '../shared/providerUrl';
@@ -37,6 +38,7 @@ import {
 import { assertContentScriptAccepted } from './messageDelivery';
 import {
   ProviderRequestError,
+  runRecoverableWorkflowStep,
   runRoundtableWorkflow,
   StepRecoveryCoordinator,
   StepRecoveryReplayCoordinator,
@@ -66,6 +68,11 @@ interface ResponseWaiter {
   resolve: (value: string) => void;
   reject: (reason: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  relayTail: Promise<void>;
+  settling: boolean;
+  deliveryReady: Promise<void>;
+  releaseDelivery: () => void;
+  deliveryAccepted: boolean;
 }
 
 interface SendParams {
@@ -101,7 +108,10 @@ const responseWaiters = new Map<string, ResponseWaiter>();
 const stepRecovery = new StepRecoveryCoordinator();
 const stepRecoveryReplay = new StepRecoveryReplayCoordinator();
 const workflowStartGate = new WorkflowStartGate();
+const workflowMarkerGate = new WorkflowStartGate();
 const workflowLifecycle = new WorkflowLifecycleRegistry();
+const sessionNavigationProviders = new Set<AIProvider>();
+let sessionNavigationFailure: Error | undefined;
 // notes: 只有這輪流程真的送過訊息的 provider 才需要記網址；其餘分頁與這個對話無關
 const workflowProviders = new Set<AIProvider>();
 let workflowAborted = false;
@@ -252,12 +262,20 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
       return true;
 
     case 'RESET_PROVIDER_SESSIONS':
+      if (sender.tab) {
+        sendResponse({ ok: false });
+        return false;
+      }
       void resetProviderSessions((message.payload as { providers?: AIProvider[] } | undefined)?.providers)
         .then(() => sendResponse({ ok: true }))
         .catch((error) => sendResponse({ ok: false, error: errorMessage(error) }));
       return true;
 
     case 'RESTORE_PROVIDER_SESSIONS':
+      if (sender.tab) {
+        sendResponse({ ok: false });
+        return false;
+      }
       void restoreProviderSessions((message.payload as { urls?: Partial<Record<AIProvider, string>> } | undefined)?.urls ?? {})
         .then(() => sendResponse({ ok: true }))
         .catch((error) => sendResponse({ ok: false, error: errorMessage(error) }));
@@ -265,6 +283,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
 
     case 'STATUS_REPORT': {
       if (!message.provider || !sender.tab?.id) return false;
+      if (sessionNavigationProviders.has(message.provider) || sender.tab.status === 'loading') return false;
       if (sender.tab.url && getProviderFromUrl(sender.tab.url) !== message.provider) return false;
       const { loggedIn = false } = (message.payload as { loggedIn?: boolean | null } | undefined) ?? {};
       const current = connections[message.provider];
@@ -334,11 +353,10 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
     }
 
     case 'RESPONSE_DONE':
-      if (!sender.tab || !message.requestId) return false;
-      settleResponseWaiter(message.requestId, message.provider, String(message.payload ?? ''));
+    case 'RESPONSE_CHUNK':
+      relayProviderResponse(message, sender);
       return false;
 
-    case 'RESPONSE_CHUNK':
     case 'ROLE_ASSIGNMENT':
     case 'WORKFLOW_STATUS':
     case 'CHECK_STATUS':
@@ -443,16 +461,38 @@ async function deliverToTab(provider: AIProvider, tabId: number, message: Extens
   try {
     return await chrome.tabs.sendMessage(tabId, message);
   } catch (firstError) {
+    if (message.action === 'SEND_MESSAGE'
+      && !/Could not establish connection\. Receiving end does not exist\.?$/i.test(errorMessage(firstError))) {
+      // A closed reply port can follow a real submission. Only a definite absent
+      // receiver proves it is safe to inject and repeat the send automatically.
+      throw new Error(encodeError('error.send_unconfirmed', { provider }));
+    }
     try {
       await chrome.scripting.executeScript({ target: { tabId }, files: [CONTENT_SCRIPT_FILES[provider]] });
       await delay(150);
-      return await chrome.tabs.sendMessage(tabId, message);
+      if (message.action === 'SEND_MESSAGE' && message.workflowId) {
+        checkAborted(message.workflowId);
+        const waiter = message.requestId ? responseWaiters.get(message.requestId) : undefined;
+        if (!waiter || waiter.workflowId !== message.workflowId || waiter.provider !== provider || waiter.tabId !== tabId) {
+          throw new DOMException('Provider request is no longer active', 'AbortError');
+        }
+      }
     } catch (injectError) {
+      if (injectError instanceof DOMException && injectError.name === 'AbortError') throw injectError;
       // Last resort failed: the tab cannot run our content script at all. Surface it —
       // the browser's message (e.g. "Blocked") is the only clue to why the provider
       // never reports its status.
       console.error(`Failed to inject the ${provider} content script into tab ${tabId}`, injectError);
       throw firstError;
+    }
+    try {
+      return await chrome.tabs.sendMessage(tabId, message);
+    } catch (retryError) {
+      if (message.action === 'SEND_MESSAGE'
+        && !/Could not establish connection\. Receiving end does not exist\.?$/i.test(errorMessage(retryError))) {
+        throw new Error(encodeError('error.send_unconfirmed', { provider }));
+      }
+      throw retryError;
     }
   }
 }
@@ -512,26 +552,49 @@ async function getProviderUrls(): Promise<Partial<Record<AIProvider, string>>> {
 }
 
 async function resetProviderSessions(targets?: AIProvider[]): Promise<void> {
-  await providerSelectionReady;
-  await Promise.all(selectedActiveTargets(targets, standbyProvider).map(async (provider) => {
-    const tabId = connections[provider].tabId;
-    if (!tabId) return;
-    updateConnection(provider, { provider, status: 'checking', tabId });
-    await chrome.tabs.update(tabId, { url: AI_PROVIDERS[provider].url });
-  }));
-  broadcastConnections();
+  await workflowStartGate.run(async () => {
+    await providerSelectionReady;
+    await navigateProviderSessions(selectedActiveTargets(targets, standbyProvider), {});
+  });
 }
 
 async function restoreProviderSessions(urls: Partial<Record<AIProvider, string>>): Promise<void> {
-  await providerSelectionReady;
-  await Promise.all(activeProviders(standbyProvider).map(async (provider) => {
-    const url = urls[provider];
+  await workflowStartGate.run(async () => {
+    await providerSelectionReady;
+    await navigateProviderSessions(activeProviders(standbyProvider), urls);
+  });
+}
+
+async function navigateProviderSessions(
+  providers: AIProvider[],
+  urls: Partial<Record<AIProvider, string>>,
+): Promise<void> {
+  if (activeWorkflowId) await abortWorkflow(activeWorkflowId);
+  const results = await Promise.allSettled(providers.map(async (provider) => {
+    const savedUrl = urls[provider];
+    const url = typeof savedUrl === 'string' && getProviderFromUrl(savedUrl) === provider
+      ? savedUrl : AI_PROVIDERS[provider].url;
     const tabId = connections[provider].tabId;
-    if (!url || !tabId || getProviderFromUrl(url) !== provider) return;
+    if (!tabId) return;
+    sessionNavigationProviders.add(provider);
     updateConnection(provider, { provider, status: 'checking', tabId });
-    await chrome.tabs.update(tabId, { url });
+    try {
+      await chrome.tabs.update(tabId, { url });
+      // A readiness report from the outgoing page must not survive navigation.
+      if (connections[provider].tabId === tabId) updateConnection(provider, { provider, status: 'checking', tabId });
+    } catch (error) {
+      if (connections[provider].tabId === tabId) updateConnection(provider, { provider, status: 'disconnected', tabId });
+      throw error;
+    } finally {
+      sessionNavigationProviders.delete(provider);
+    }
   }));
+  const failure = results.find((result) => result.status === 'rejected');
+  sessionNavigationFailure = failure?.status === 'rejected'
+    ? failure.reason instanceof Error ? failure.reason : new Error(String(failure.reason))
+    : undefined;
   broadcastConnections();
+  if (sessionNavigationFailure) throw sessionNavigationFailure;
 }
 
 async function sendToProvider(provider: AIProvider, text: string, requestId: string, workflowId: string): Promise<void> {
@@ -542,6 +605,8 @@ async function sendToProvider(provider: AIProvider, text: string, requestId: str
     throw new Error(encodeError('error.not_ready', { provider }));
   }
   workflowProviders.add(provider);
+  const waiter = responseWaiters.get(requestId);
+  if (waiter) waiter.tabId = connection.tabId;
   const result = await deliverToTab(provider, connection.tabId, {
     action: 'SEND_MESSAGE',
     provider,
@@ -550,6 +615,14 @@ async function sendToProvider(provider: AIProvider, text: string, requestId: str
     payload: { text },
   });
   assertContentScriptAccepted(result);
+  if (!result || typeof result !== 'object' || (result as { ok?: unknown }).ok !== true) {
+    throw new Error(encodeError('error.send_unconfirmed', { provider }));
+  }
+  const acceptedWaiter = responseWaiters.get(requestId);
+  if (acceptedWaiter) {
+    acceptedWaiter.deliveryAccepted = true;
+    acceptedWaiter.releaseDelivery();
+  }
 }
 
 async function ensureActiveProvider(provider: AIProvider): Promise<void> {
@@ -563,25 +636,30 @@ async function sendAndWait(
   provider: AIProvider,
   text: string,
   workflowId: string,
-  preserveQuestionLanguage = true,
   reservedRequestId?: string,
 ): Promise<string> {
   checkAborted(workflowId);
   const requestId = reservedRequestId ?? createProviderRequestId(provider, workflowId);
   const responsePromise = waitForResponse(provider, requestId, workflowId);
+  // Delivery and generation can fail independently while either is pending.
+  void responsePromise.catch(() => {});
   try {
     try {
-      const prompt = preserveQuestionLanguage
-        ? `${text}\n\nLanguage requirement: answer in the same language as the user's original question.`
-        : text;
+      const prompt = appendResponseLanguagePolicy(text);
       await sendToProvider(provider, prompt, requestId, workflowId);
     } catch (error) {
       rejectResponseWaiter(requestId, error instanceof Error ? error : new Error(String(error)));
+      await responsePromise.catch(() => {});
+      throw error;
     }
     const response = await responsePromise;
+    checkAborted(workflowId);
     const providerError = response.match(/^\[Error:\s*(.+)]$/s);
     if (providerError) {
       throw new ProviderRequestError(provider, workflowId, requestId, new Error(providerError[1]), true);
+    }
+    if (!response.trim()) {
+      throw new ProviderRequestError(provider, workflowId, requestId, new Error(encodeError('error.no_response_text', { provider })));
     }
     return response;
   } catch (error) {
@@ -597,20 +675,51 @@ function createProviderRequestId(provider: AIProvider, workflowId: string): stri
 
 function waitForResponse(provider: AIProvider, requestId: string, workflowId: string, timeoutMs = 600_000): Promise<string> {
   return new Promise((resolve, reject) => {
+    let releaseDelivery = () => {};
+    const deliveryReady = new Promise<void>((ready) => { releaseDelivery = ready; });
     const timer = setTimeout(() => {
-      responseWaiters.delete(requestId);
-      reject(new Error(encodeError('error.timeout', { provider, seconds: Math.round(timeoutMs / 1000) })));
+      rejectResponseWaiter(requestId, new Error(encodeError('error.timeout', { provider, seconds: Math.round(timeoutMs / 1000) })));
     }, timeoutMs);
-    responseWaiters.set(requestId, { provider, workflowId, tabId: connections[provider].tabId, resolve, reject, timer });
+    responseWaiters.set(requestId, {
+      provider, workflowId, resolve, reject, timer, relayTail: Promise.resolve(), settling: false,
+      deliveryReady, releaseDelivery, deliveryAccepted: false,
+    });
   });
 }
 
-function settleResponseWaiter(requestId: string, provider: AIProvider | undefined, response: string): void {
+function relayProviderResponse(message: ExtensionMessage, sender: chrome.runtime.MessageSender): void {
+  if (!message.requestId || typeof message.payload !== 'string') return;
+  const requestId = message.requestId;
   const waiter = responseWaiters.get(requestId);
-  if (!waiter || provider !== waiter.provider) return;
-  clearTimeout(waiter.timer);
-  responseWaiters.delete(requestId);
-  waiter.resolve(response);
+  if (!waiter || waiter.settling
+    || message.provider !== waiter.provider
+    || message.workflowId !== waiter.workflowId
+    || waiter.tabId === undefined || sender.tab?.id !== waiter.tabId
+    || !sender.tab.url || getProviderFromUrl(sender.tab.url) !== waiter.provider) return;
+  const done = message.action === 'RESPONSE_DONE';
+  if (done) waiter.settling = true;
+  const response = done && !message.payload.trim()
+    ? `[Error: ${encodeError('error.no_response_text', { provider: waiter.provider })}]`
+    : message.payload;
+  // Content messages also reach extension pages directly. The panel consumes only
+  // this validated relay; keep chunks and completion ordered before advancing.
+  waiter.relayTail = waiter.relayTail.then(async () => {
+    await waiter.deliveryReady;
+    if (!waiter.deliveryAccepted || responseWaiters.get(requestId) !== waiter) return;
+    await chrome.runtime.sendMessage({
+      action: done ? 'RESPONSE_DONE' : 'RESPONSE_CHUNK',
+      provider: waiter.provider,
+      requestId,
+      workflowId: waiter.workflowId,
+      payload: response,
+    }).catch(() => {});
+    if (!done || responseWaiters.get(requestId) !== waiter) return;
+    clearTimeout(waiter.timer);
+    responseWaiters.delete(requestId);
+    waiter.resolve(response);
+  }).catch((error: unknown) => {
+    rejectResponseWaiter(requestId, error instanceof Error ? error : new Error(String(error)));
+  });
 }
 
 function rejectResponseWaiter(requestId: string, error: Error): void {
@@ -618,6 +727,7 @@ function rejectResponseWaiter(requestId: string, error: Error): void {
   if (!waiter) return;
   clearTimeout(waiter.timer);
   responseWaiters.delete(requestId);
+  waiter.releaseDelivery();
   waiter.reject(error);
 }
 
@@ -664,6 +774,7 @@ async function handleSendMessage(params: SendParams): Promise<void> {
     const question = questionWithConversationContext(params.text, params.context);
     await sendWorkflowStatus({ key: 'workflow.starting' }, workflowId, params.sessionId, params.clientId);
     checkAborted(workflowId);
+    if (sessionNavigationFailure) throw sessionNavigationFailure;
     switch (params.mode) {
       case 'free':
         await handleFreeMode(question, params.targets, workflowId);
@@ -682,7 +793,7 @@ async function handleSendMessage(params: SendParams): Promise<void> {
         break;
     }
   } catch (error) {
-    if (!(error instanceof DOMException && error.name === 'AbortError')) sendSystemError(errorMessage(error), workflowId);
+    if (!(error instanceof DOMException && error.name === 'AbortError')) await sendSystemError(errorMessage(error), workflowId);
   } finally {
     stepRecovery.cancel(workflowId);
     const completionClientId = activeWorkflowId === workflowId ? activeClientId : params.clientId;
@@ -710,14 +821,14 @@ async function beginWorkflow(params: SendParams): Promise<void> {
     activeWorkflowId = params.workflowId;
     activeSessionId = params.sessionId;
     activeClientId = params.clientId;
-    await chrome.storage.session.set({
+    await workflowMarkerGate.run(() => chrome.storage.session.set({
       [ACTIVE_WORKFLOW_STORAGE_KEY]: {
         workflowId: params.workflowId,
         sessionId: params.sessionId,
         clientId: params.clientId,
         startedAt: Date.now(),
       },
-    });
+    }));
   });
 }
 
@@ -737,7 +848,7 @@ function isSendParams(value: unknown): value is SendParams {
 
 async function notifyInterruptedWorkflow(target?: { clientId?: string; sessionId?: string }): Promise<void> {
   if (activeWorkflowId) return;
-  const stored = await chrome.storage.session.get(ACTIVE_WORKFLOW_STORAGE_KEY);
+  const stored = await workflowMarkerGate.run(() => chrome.storage.session.get(ACTIVE_WORKFLOW_STORAGE_KEY));
   if (activeWorkflowId) return;
   const interrupted = stored[ACTIVE_WORKFLOW_STORAGE_KEY] as { workflowId?: string; sessionId?: string; clientId?: string } | undefined;
   if (!interrupted?.workflowId || !interrupted.sessionId || !interrupted.clientId) return;
@@ -749,7 +860,7 @@ async function notifyInterruptedWorkflow(target?: { clientId?: string; sessionId
     interrupted.sessionId,
     target.clientId,
   );
-  sendSystemError(encodeError('error.worker_stopped'), interruptedWorkflowId);
+  await sendSystemError(encodeError('error.worker_stopped'), interruptedWorkflowId);
   await sendWorkflowStatus(
     { key: '', done: true, cancelled: false },
     interruptedWorkflowId,
@@ -760,9 +871,11 @@ async function notifyInterruptedWorkflow(target?: { clientId?: string; sessionId
 }
 
 async function clearPersistedWorkflow(workflowId: string): Promise<void> {
-  const stored = await chrome.storage.session.get(ACTIVE_WORKFLOW_STORAGE_KEY);
-  const active = stored[ACTIVE_WORKFLOW_STORAGE_KEY] as { workflowId?: string } | undefined;
-  if (active?.workflowId === workflowId) await chrome.storage.session.remove(ACTIVE_WORKFLOW_STORAGE_KEY);
+  await workflowMarkerGate.run(async () => {
+    const stored = await chrome.storage.session.get(ACTIVE_WORKFLOW_STORAGE_KEY);
+    const active = stored[ACTIVE_WORKFLOW_STORAGE_KEY] as { workflowId?: string } | undefined;
+    if (active?.workflowId === workflowId) await chrome.storage.session.remove(ACTIVE_WORKFLOW_STORAGE_KEY);
+  });
 }
 
 async function handleFreeMode(text: string, requestedTargets: AIProvider[] | undefined, workflowId: string): Promise<void> {
@@ -773,7 +886,7 @@ async function handleFreeMode(text: string, requestedTargets: AIProvider[] | und
   sendWorkflowStatus(unready.length
     ? { key: 'workflow.free.partial', params: { ready: providers, providers: unready.map(name).join(' · ') } }
     : { key: 'workflow.free', params: { providers } });
-  const results = await Promise.allSettled(targets.map((provider) => sendAndWait(provider, text, workflowId, false)));
+  const results = await Promise.allSettled(targets.map((provider) => sendAndWait(provider, text, workflowId)));
   checkAborted(workflowId);
   const failures = results.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
   if (failures.length === 0) return;
@@ -786,28 +899,28 @@ async function handleFreeMode(text: string, requestedTargets: AIProvider[] | und
     if (undelivered.length === 0) return;
     throw undelivered[0];
   }
-  for (const error of undelivered) sendProviderFailure(error);
+  for (const error of undelivered) await sendProviderFailure(error);
 }
 
 async function handleDebateMode(text: string, roles: DebateRoles, workflowId: string): Promise<void> {
-  sendWorkflowStatus(status('workflow.debate.pro', roles.pro));
-  sendRoleAssignment(roles.pro, 'role.pro');
-  const proResponse = await sendAndWait(roles.pro, PROMPTS.debate.pro(text), workflowId);
-  checkAborted(workflowId);
-
-  sendWorkflowStatus(status('workflow.debate.con', roles.con));
-  sendRoleAssignment(roles.con, 'role.con');
-  const conResponse = await sendAndWait(roles.con, PROMPTS.debate.con(text, proResponse), workflowId);
-  checkAborted(workflowId);
-
-  sendWorkflowStatus(status('workflow.debate.judge', roles.judge));
-  sendRoleAssignment(roles.judge, 'role.judge');
-  const judgeResponse = await sendAndWait(roles.judge, PROMPTS.debate.judge(text, proResponse, conResponse), workflowId);
-  checkAborted(workflowId);
-
-  sendWorkflowStatus(status('workflow.debate.summary', roles.summary));
-  sendRoleAssignment(roles.summary, 'role.summary');
-  await sendAndWait(roles.summary, PROMPTS.debate.summary(text, proResponse, conResponse, judgeResponse), workflowId);
+  const stage = async (provider: AIProvider, role: keyof DebateRoles, prompt: string): Promise<string> => {
+    checkAborted(workflowId);
+    await sendWorkflowStatus(status(`workflow.debate.${role}`, provider));
+    checkAborted(workflowId);
+    return runRecoverableWorkflowStep(provider, prompt, workflowId, `role.${role}`, {
+      checkAborted,
+      createRequestId: createProviderRequestId,
+      sendRoleAssignment,
+      sendAndWait,
+      requestRecovery: requestStepRecovery,
+      resetProvider: resetProviderAfterFailure,
+      cancelWorkflow: abortWorkflow,
+    });
+  };
+  const proResponse = await stage(roles.pro, 'pro', PROMPTS.debate.pro(text));
+  const conResponse = await stage(roles.con, 'con', PROMPTS.debate.con(text, proResponse));
+  const judgeResponse = await stage(roles.judge, 'judge', PROMPTS.debate.judge(text, proResponse, conResponse));
+  await stage(roles.summary, 'summary', PROMPTS.debate.summary(text, proResponse, conResponse, judgeResponse));
 }
 
 async function handleConsultMode(text: string, roles: ConsultRoles, workflowId: string): Promise<void> {
@@ -867,7 +980,7 @@ async function handleRoundtableMode(text: string, roles: RoundtableRoles, workfl
       await sendWorkflowStatus({ key: 'workflow.roundtable', params: { round, labelKey: `round.${round}`, provider: name(participant) } });
     },
     sendRoleAssignment,
-    sendAndWait: (participant, prompt, activeId, requestId) => sendAndWait(participant, prompt, activeId, true, requestId),
+    sendAndWait,
     requestRecovery: requestStepRecovery,
     resetProvider: resetProviderAfterFailure,
     cancelWorkflow: abortWorkflow,
@@ -972,8 +1085,8 @@ function sendStepRecoveryMessage(request: StepRecoveryRequest): void {
   }).catch(() => {});
 }
 
-function sendProviderFailure(error: ProviderRequestError): void {
-  chrome.runtime.sendMessage({
+async function sendProviderFailure(error: ProviderRequestError): Promise<void> {
+  await chrome.runtime.sendMessage({
     action: 'RESPONSE_DONE',
     provider: error.provider,
     requestId: error.requestId,
@@ -1067,8 +1180,8 @@ async function replayPendingStepRecovery(target?: { clientId?: string; sessionId
   }, sendStepRecoveryMessage);
 }
 
-function sendSystemError(message: string, workflowId = activeWorkflowId): void {
-  chrome.runtime.sendMessage({
+async function sendSystemError(message: string, workflowId = activeWorkflowId): Promise<void> {
+  await chrome.runtime.sendMessage({
     action: 'RESPONSE_DONE',
     provider: 'system' as AIProvider,
     requestId: `system:${crypto.randomUUID()}`,

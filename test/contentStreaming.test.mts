@@ -122,6 +122,7 @@ function content(t: TestContext, streamWhileThinking?: boolean) {
       if (notify) mutation();
     },
     end() { busy = false; },
+    resume() { busy = true; },
     tick,
     chunks: () => messages.filter(message => message.action === 'RESPONSE_CHUNK'),
     done: () => messages.filter(message => message.action === 'RESPONSE_DONE'),
@@ -188,5 +189,34 @@ test('scoped Stop during a streamed answer suppresses subsequent chunks and comp
   app.answer('late text after Stop');
   app.tick(6000);
   assert.equal(app.chunks().length, 1);
+  assert.equal(app.done().length, 0);
+});
+
+test('generation resuming during the completion quiet period does not finalize a partial answer', async (t) => {
+  const app = content(t);
+  await app.start();
+  app.end();
+  app.answer('partial answer');
+  app.resume();
+  app.tick(1000);
+  app.end();
+  app.tick(1000);
+  app.resume();
+  app.tick(1000);
+  assert.equal(app.done().length, 0);
+  app.end();
+  app.answer('complete answer');
+  app.tick(2000);
+  assert.equal(app.done()[0]?.payload, 'complete answer');
+});
+
+test('generation resuming during the no-response quiet period does not report failure', async (t) => {
+  const app = content(t, true);
+  await app.start();
+  app.tick(120000);
+  app.end();
+  app.tick(2200);
+  app.resume();
+  app.tick(1000);
   assert.equal(app.done().length, 0);
 });

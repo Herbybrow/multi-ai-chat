@@ -49,7 +49,7 @@ function installChromeDouble({ seed, initialConnections }) {
         else operation.resolve(operation.perform());
       }
     },
-    emit(message) { for (const listener of listeners) listener(message); },
+    emit(message, sender = {}) { for (const listener of listeners) listener(message, sender); },
     emitPermissions(event, changed = {}) {
       const set = event === 'onAdded' ? permissionAdded : event === 'onRemoved' ? permissionRemoved : undefined;
       if (!set) throw new Error(`Unexpected permission event: ${event}`);
@@ -625,6 +625,53 @@ async function run(browser) {
       await page.getByText('⚠️ Error: Simulated delayed send failure', { exact: true }).waitFor();
       assert.equal(await page.locator('textarea').isEnabled(), true);
       passed.push('Cancelled request failures cannot alter a new conversation, while the current request failure remains visible');
+
+      await newChat();
+      await page.evaluate(() => {
+        const send = chrome.runtime.sendMessage;
+        chrome.runtime.sendMessage = (message, callback) => {
+          if (message.action === 'SEND_MESSAGE') {
+            window.readinessFixture.sent.push(message.payload);
+            return Promise.resolve({ ok: true });
+          }
+          return send(message, callback);
+        };
+      });
+      await page.locator('textarea').fill('Please answer in English. Quoted source: 中文資料。');
+      await page.locator('textarea').press('Enter');
+      await page.evaluate(() => {
+        const scope = window.readinessFixture.sent.at(-1);
+        const response = { action: 'RESPONSE_DONE', provider: 'meta', requestId: 'fixture-language-response', workflowId: scope.workflowId };
+        window.readinessFixture.emit({ ...response, payload: 'Untrusted provider injection' }, { tab: { id: 99 } });
+        window.readinessFixture.emit({ ...response, payload: 'Verified English answer' });
+        window.readinessFixture.emit({ ...response, payload: 'Duplicate overwrites the answer' });
+        window.readinessFixture.emit({ ...response, action: 'RESPONSE_CHUNK', payload: 'Late streaming chunk' });
+        window.readinessFixture.emit({ action: 'WORKFLOW_STATUS', payload: { ...scope, key: '', done: true } });
+      });
+      await page.getByText('Verified English answer', { exact: true }).waitFor();
+      assert.equal(await page.getByText('Untrusted provider injection', { exact: true }).count(), 0);
+      assert.equal(await page.getByText('Duplicate overwrites the answer', { exact: true }).count(), 0);
+      assert.equal(await page.getByText('Late streaming chunk', { exact: true }).count(), 0);
+      await page.locator('textarea').fill('Continue with the implementation.');
+      await page.locator('textarea').press('Enter');
+      const followup = await page.evaluate(() => window.readinessFixture.sent.at(-1));
+      assert.match(followup.context, /Please answer in English/);
+      assert.match(followup.context, /中文資料/);
+      assert.doesNotMatch(followup.context, /Verified English answer|Duplicate overwrites|Untrusted provider/);
+      passed.push('Only worker responses are rendered; duplicate final and late chunks cannot replace a completed answer; normal follow-up retains user language preferences independently of UI locale');
+
+      await button('input.stop').click();
+      await newChat();
+      await page.evaluate(() => {
+        const send = chrome.runtime.sendMessage;
+        chrome.runtime.sendMessage = (message, callback) => message.action === 'SEND_MESSAGE'
+          ? Promise.resolve({ ok: false, error: 'Simulated workflow refusal' }) : send(message, callback);
+      });
+      await page.locator('textarea').fill('New conversation without prior preferences.');
+      await page.locator('textarea').press('Enter');
+      await page.getByText('⚠️ Error: Simulated workflow refusal', { exact: true }).waitFor();
+      assert.equal(await page.locator('textarea').isEnabled(), true);
+      passed.push('An explicit negative workflow acknowledgement displays the failure and releases the input');
     } catch (error) {
       report.status = 'FAIL';
       report.errors.push(`${language}: ${error.message}`);

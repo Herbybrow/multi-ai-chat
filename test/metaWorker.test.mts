@@ -62,6 +62,7 @@ function worker(
   const stops: any[] = [];
   const broadcasts: any[] = [];
   const navigated: number[] = [];
+  const navigations: { tabId: number; url?: string }[] = [];
   const created: { url: string }[] = [];
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const local = { ...stored };
@@ -69,6 +70,8 @@ function worker(
   const rejectSend = extras.rejectSend ?? [];
   const broadcastHold: { current?: (message: any) => Promise<void> | void } = {};
   const sessionGetHold: { current?: () => Promise<void> } = {};
+  const navigationHold: { current?: (tabId: number, options?: { url?: string }) => Promise<void> } = {};
+  const sendAcknowledgement: { current?: (message: any) => Promise<unknown> | unknown } = {};
   const tabs = ALL_PROVIDERS.flatMap((provider, index) => missingTabs.includes(provider) ? [] : [{ id: index + 1, url: AI_PROVIDERS[provider].url }]);
   interface DynamicScript {
     id: string;
@@ -114,7 +117,12 @@ function worker(
       query: async () => tabs,
       get: async (id: number) => tabs.find((tab) => tab.id === id),
       create: async (options: { url: string }) => { created.push(options); },
-      update: async (id: number) => { navigated.push(id); return tabs.find((tab) => tab.id === id); },
+      update: async (id: number, options?: { url?: string }) => {
+        navigated.push(id);
+        navigations.push({ tabId: id, url: options?.url });
+        if (navigationHold.current) await navigationHold.current(id, options);
+        return tabs.find((tab) => tab.id === id);
+      },
       sendMessage: async (id: number, message: any) => {
         if (message.action === 'CHECK_STATUS') {
           const provider = message.provider as AIProvider;
@@ -124,6 +132,7 @@ function worker(
           sent.push({ ...message, tabId: id });
           if (rejectSend.includes(message.provider)) return { ok: false, error: 'already responding' };
           if (autoRespond) complete(sent.at(-1));
+          if (sendAcknowledgement.current) return await sendAcknowledgement.current(sent.at(-1));
         }
         if (message.action === 'STOP_GENERATION') stops.push({ ...message, tabId: id });
         return { ok: true };
@@ -186,11 +195,17 @@ function worker(
   const context = vm.createContext({
     chrome, console, URL, DOMException, crypto, TextEncoder,
     setTimeout: (...args: Parameters<typeof setTimeout>) => {
-      const timer = setTimeout(...args);
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        args[0](...args.slice(2));
+      }, args[1]);
       timers.add(timer);
       return timer;
     },
-    clearTimeout,
+    clearTimeout: (timer: ReturnType<typeof setTimeout>) => {
+      timers.delete(timer);
+      clearTimeout(timer);
+    },
   });
   const cache = new Map<string, { exports: unknown }>();
   function load(file: string): unknown {
@@ -200,17 +215,24 @@ function worker(
     const code = ts.transpileModule(readFileSync(file, 'utf8'), {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
     }).outputText;
-    const run = vm.runInContext(`(function(require, module, exports) {${code}\n})`, context, { filename: file });
+    const inspectWaiters = file === path.join(root, 'src/background/service-worker.ts')
+      ? '\nmodule.exports.pendingResponseCount = () => responseWaiters.size;'
+      : '';
+    const run = vm.runInContext(`(function(require, module, exports) {${code}${inspectWaiters}\n})`, context, { filename: file });
     run((relative: string) => load(path.resolve(path.dirname(file), `${relative}.ts`)), module, module.exports);
     return module.exports;
   }
-  load(path.join(root, 'src/background/service-worker.ts'));
+  const workerState = load(path.join(root, 'src/background/service-worker.ts')) as { pendingResponseCount: () => number };
   const ready = new Promise<void>((resolve) => setImmediate(resolve));
   return {
-    command, sent, stops, broadcasts, local, session, navigated, created, ready, complete, fail, removeTab,
+    command, receive, sent, stops, broadcasts, local, session, navigated, navigations, created, ready, complete, fail, removeTab,
     dynamicScripts, contentScriptErrors, permissions: chrome.permissions, runtime: chrome.runtime,
     holdBroadcasts(handler?: (message: any) => Promise<void> | void) { broadcastHold.current = handler; },
     holdSessionGets(handler?: () => Promise<void>) { sessionGetHold.current = handler; },
+    holdNavigations(handler?: (tabId: number, options?: { url?: string }) => Promise<void>) { navigationHold.current = handler; },
+    holdSendAcknowledgements(handler?: (message: any) => Promise<unknown> | unknown) { sendAcknowledgement.current = handler; },
+    pendingResponseCount: workerState.pendingResponseCount,
+    pendingTimerCount: () => timers.size,
     grantMetaHostAccess: (granted: boolean) => { metaHostPermitted = granted; },
     close: () => { for (const timer of timers) clearTimeout(timer); },
     send: (mode = 'free', targets?: string[], options: {
@@ -258,8 +280,299 @@ test('worker swaps Meta into fanout and leaves standby tabs untouched during ses
   await app.command({ action: 'RESTORE_PROVIDER_SESSIONS', payload: {
     urls: { grok: 'https://grok.com/chat/old', meta: 'https://www.meta.ai/prompt/current' },
   } });
-  assert.deepEqual(app.navigated, [1, 2, 3, 5, 5]);
+  assert.deepEqual(app.navigated, [1, 2, 3, 5, 1, 2, 3, 5]);
+  assert.deepEqual(app.navigations.slice(4), [
+    { tabId: 1, url: AI_PROVIDERS.chatgpt.url },
+    { tabId: 2, url: AI_PROVIDERS.claude.url },
+    { tabId: 3, url: AI_PROVIDERS.gemini.url },
+    { tabId: 5, url: 'https://www.meta.ai/prompt/current' },
+  ]);
   assert.equal((await app.command({ action: 'OPEN_LOGIN', provider: 'grok' })).ok, false);
+});
+
+test('session restore resets missing or foreign active provider URLs and leaves standby untouched', async (t) => {
+  const app = worker();
+  t.after(app.close);
+  await app.ready;
+  await app.command({ action: 'RESTORE_PROVIDER_SESSIONS', payload: {
+    urls: {
+      chatgpt: 'https://chatgpt.com.evil.example/chat/old',
+      claude: 'https://chatgpt.com/chat/other-provider',
+      gemini: 'https://gemini.google.com/app/saved',
+      meta: 'https://www.meta.ai/prompt/standby',
+    },
+  } });
+  assert.deepEqual(app.navigations, [
+    { tabId: 1, url: AI_PROVIDERS.chatgpt.url },
+    { tabId: 2, url: AI_PROVIDERS.claude.url },
+    { tabId: 3, url: 'https://gemini.google.com/app/saved' },
+    { tabId: 4, url: AI_PROVIDERS.grok.url },
+  ]);
+  assert.equal(app.navigated.includes(5), false);
+});
+
+for (const action of ['RESET_PROVIDER_SESSIONS', 'RESTORE_PROVIDER_SESSIONS'] as const) {
+  test(`${action} cannot be requested by a content-script tab`, async (t) => {
+    const app = worker();
+    t.after(app.close);
+    await app.ready;
+    assert.equal((await app.command({ action }, { tab: { id: 1, url: AI_PROVIDERS.chatgpt.url } })).ok, false);
+    assert.equal(app.navigated.length, 0);
+  });
+
+  test(`${action} completes before a new workflow can reuse a previous-page readiness report`, async (t) => {
+    const app = worker({}, false);
+    let release: (() => void) | undefined;
+    t.after(() => { release?.(); app.close(); });
+    await app.ready;
+    const pause = new Promise<void>((resolve) => { release = resolve; });
+    let held = 0;
+    app.holdNavigations(async (_tabId, options) => {
+      if (!options?.url) return;
+      held += 1;
+      await pause;
+    });
+    const navigation = app.command({ action });
+    await waitUntil(() => held > 0, 'session navigation held');
+    app.receive({ action: 'STATUS_REPORT', provider: 'grok', payload: { loggedIn: true } }, {
+      tab: { id: 4, url: AI_PROVIDERS.grok.url },
+    });
+    const running = app.send('free', ['grok'], { sessionId: 'new-session' });
+    await flushWorkerTurns();
+    assert.equal(app.sent.length, 0);
+    release?.();
+    app.holdNavigations();
+    await navigation;
+    app.receive({ action: 'STATUS_REPORT', provider: 'grok', payload: { loggedIn: true } }, {
+      tab: { id: 4, url: AI_PROVIDERS.grok.url },
+    });
+    await waitUntil(() => app.sent.length === 1, 'new-session request after navigation');
+    app.complete(app.sent[0]);
+    await running;
+  });
+}
+
+test('a failed session reset cannot reuse prior context and must finish pending navigation before retry', async (t) => {
+  const app = worker({}, false);
+  let release: (() => void) | undefined;
+  t.after(() => { release?.(); app.close(); });
+  await app.ready;
+  const pause = new Promise<void>((resolve) => { release = resolve; });
+  let held = 0;
+  app.holdNavigations(async (tabId, options) => {
+    if (!options?.url) return;
+    if (tabId === 1) throw new Error('session navigation failed');
+    held += 1;
+    await pause;
+  });
+  const navigation = app.command({ action: 'RESET_PROVIDER_SESSIONS' });
+  await waitUntil(() => held === 3, 'other navigations remain pending');
+  const running = app.send('free', ['grok'], { sessionId: 'new-session' });
+  await flushWorkerTurns();
+  assert.equal(app.broadcasts.some((message) => message.payload?.key === 'workflow.starting'), false);
+  release?.();
+  app.holdNavigations();
+  assert.equal((await navigation).ok, false);
+  app.receive({ action: 'STATUS_REPORT', provider: 'grok', payload: { loggedIn: true } }, {
+    tab: { id: 4, url: AI_PROVIDERS.grok.url },
+  });
+  await running;
+  assert.equal(app.sent.length, 0);
+  assert.ok(app.broadcasts.some((message) => message.provider === 'system' && /session navigation failed/.test(message.payload)));
+  assert.equal((await app.command({ action: 'RESET_PROVIDER_SESSIONS' })).ok, true);
+  app.receive({ action: 'STATUS_REPORT', provider: 'grok', payload: { loggedIn: true } }, {
+    tab: { id: 4, url: AI_PROVIDERS.grok.url },
+  });
+  const retried = app.send('free', ['grok'], { sessionId: 'new-session' });
+  await waitUntil(() => app.sent.length === 1, 'send after successful reset retry');
+  app.complete(app.sent[0]);
+  await retried;
+});
+
+test('Stop followed immediately by New Chat reset does not deadlock workflow starts', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  const first = app.send('debate');
+  await waitUntil(() => app.sent.length === 1, 'old Debate request');
+  const cancelled = app.command({ action: 'CANCEL_WORKFLOW', payload: {
+    workflowId: app.sent[0].workflowId, sessionId: 'session', clientId: 'client',
+  } });
+  const reset = app.command({ action: 'RESET_PROVIDER_SESSIONS' });
+  assert.equal((await cancelled).ok, true);
+  assert.equal((await reset).ok, true);
+  await first;
+  app.receive({ action: 'STATUS_REPORT', provider: 'grok', payload: { loggedIn: true } }, {
+    tab: { id: 4, url: AI_PROVIDERS.grok.url },
+  });
+  const next = app.send('free', ['grok'], { sessionId: 'new-session' });
+  await waitUntil(() => app.sent.length === 2, 'new chat after Stop and reset');
+  app.complete(app.sent[1]);
+  await next;
+  assert.equal(app.pendingResponseCount(), 0);
+});
+
+test('a completion before a rejected send acknowledgement cannot become a Debate argument', async (t) => {
+  const app = worker({}, false);
+  let release: (() => void) | undefined;
+  t.after(() => { release?.(); app.close(); });
+  await app.ready;
+  const pause = new Promise<void>((resolve) => { release = resolve; });
+  app.holdSendAcknowledgements(async (message) => {
+    app.complete(message, 'normal response before rejected acknowledgement');
+    await pause;
+    return { ok: false, error: 'content rejected request' };
+  });
+  const running = app.send('debate');
+  await waitUntil(() => app.sent.length === 1, 'request with pending acknowledgement');
+  await flushWorkerTurns();
+  assert.equal(app.broadcasts.some((message) => message.action === 'RESPONSE_DONE'), false);
+  release?.();
+  app.holdSendAcknowledgements();
+  await waitUntil(() => app.broadcasts.some((message) => message.action === 'STEP_RECOVERY_REQUIRED'), 'rejected acknowledgement recovery');
+  assert.equal(app.sent.length, 1);
+  assert.equal(app.broadcasts.some((message) => message.payload === 'normal response before rejected acknowledgement'), false);
+  const recovery = app.broadcasts.find((message) => message.action === 'STEP_RECOVERY_REQUIRED')!.payload;
+  assert.match(recovery.reason, /content rejected request/);
+  await app.command({ action: 'RESOLVE_STEP_RECOVERY', payload: { ...recovery, action: 'skip' } });
+  await completeRemaining(app, running);
+  assert.doesNotMatch(app.sent[1].payload.text, /normal response before rejected acknowledgement/);
+});
+
+for (const acknowledgement of [undefined, {}, { ok: 'yes' }]) {
+  test(`an unconfirmed send acknowledgement ${JSON.stringify(acknowledgement)} cannot relay a successful answer`, async (t) => {
+    const app = worker({}, false);
+    t.after(app.close);
+    await app.ready;
+    app.holdSendAcknowledgements((message) => {
+      app.complete(message, 'unconfirmed answer');
+      return acknowledgement;
+    });
+    await app.send('free', ['grok']);
+    assert.equal(app.broadcasts.some((message) => message.payload === 'unconfirmed answer'), false);
+    assert.equal(decodeError(app.broadcasts.find((message) => message.provider === 'system')?.payload)?.key, 'error.send_unconfirmed');
+    assert.equal(app.pendingResponseCount(), 0);
+  });
+}
+
+test('an ambiguous send transport error does not automatically reinject and replay the provider prompt', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  app.holdSendAcknowledgements(() => {
+    throw new Error('The message port closed before a response was received.');
+  });
+  const running = app.send('debate');
+  await waitUntil(() => app.broadcasts.some((message) => message.action === 'STEP_RECOVERY_REQUIRED'), 'ambiguous delivery recovery');
+  assert.equal(app.sent.length, 1);
+  const recovery = app.broadcasts.find((message) => message.action === 'STEP_RECOVERY_REQUIRED')!.payload;
+  app.holdSendAcknowledgements();
+  await app.command({ action: 'RESOLVE_STEP_RECOVERY', payload: { ...recovery, action: 'cancel' } });
+  await running;
+});
+
+test('a definitely absent content receiver can be injected and sent the same request once', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  let attempt = 0;
+  app.holdSendAcknowledgements((message) => {
+    attempt += 1;
+    if (attempt === 1) throw new Error('Could not establish connection. Receiving end does not exist.');
+    app.complete(message, 'confirmed receiver answer');
+    return { ok: true };
+  });
+  await app.send('free', ['grok']);
+  assert.equal(app.sent.length, 2);
+  assert.equal(app.sent[0].requestId, app.sent[1].requestId);
+  assert.equal(app.broadcasts.filter((message) => message.payload === 'confirmed receiver answer').length, 1);
+  assert.equal(app.pendingResponseCount(), 0);
+  assert.equal(app.pendingTimerCount(), 0);
+});
+
+test('an ambiguous repaired send reports uncertain delivery without replaying again', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  let attempt = 0;
+  app.holdSendAcknowledgements(() => {
+    attempt += 1;
+    throw new Error(attempt === 1
+      ? 'Could not establish connection. Receiving end does not exist.'
+      : 'The message port closed before a response was received.');
+  });
+  const running = app.send('debate');
+  await waitUntil(() => app.broadcasts.some((message) => message.action === 'STEP_RECOVERY_REQUIRED'), 'repaired send uncertainty');
+  assert.equal(app.sent.length, 2);
+  const recovery = app.broadcasts.find((message) => message.action === 'STEP_RECOVERY_REQUIRED')!.payload;
+  assert.equal(decodeError(recovery.reason)?.key, 'error.send_unconfirmed');
+  app.holdSendAcknowledgements();
+  await app.command({ action: 'RESOLVE_STEP_RECOVERY', payload: { ...recovery, action: 'cancel' } });
+  await running;
+  assert.equal(app.sent.length, 2);
+});
+
+test('cancellation during absent-receiver repair prevents a delayed repeat send', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  app.holdSendAcknowledgements(() => {
+    throw new Error('Could not establish connection. Receiving end does not exist.');
+  });
+  const running = app.send('debate');
+  await waitUntil(() => app.sent.length === 1, 'first missing-receiver attempt');
+  await app.command({ action: 'CANCEL_WORKFLOW', payload: {
+    workflowId: app.sent[0].workflowId, sessionId: 'session', clientId: 'client',
+  } });
+  await running;
+  assert.equal(app.sent.length, 1);
+  assert.equal(app.pendingResponseCount(), 0);
+  assert.equal(app.pendingTimerCount(), 0);
+});
+
+test('25 alternating Roundtable and Debate workflows keep isolated contexts and clean request state', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  const startedAt = performance.now();
+  const previousQuestions: string[] = [];
+  let totalContributions = 0;
+  const roundtable: RoundtableRoles = { first: 'chatgpt', second: 'claude', third: 'gemini', fourth: 'grok' };
+  const debate: DebateRoles = { pro: 'chatgpt', con: 'claude', judge: 'gemini', summary: 'grok' };
+  for (let run = 0; run < 25; run += 1) {
+    const mode = run % 2 === 0 ? 'roundtable' : 'debate';
+    const count = mode === 'roundtable' ? 20 : 4;
+    const question = `REPEAT_RUN_${run + 1}_QUESTION;`;
+    const start = app.sent.length;
+    const workflowId = crypto.randomUUID();
+    const running = app.send(mode, undefined, {
+      workflowId, sessionId: `repeat-session-${run + 1}`, text: question,
+      roles: mode === 'roundtable' ? roundtable : debate,
+    });
+    for (let turn = 0; turn < count; turn += 1) {
+      await waitUntil(() => app.sent.length === start + turn + 1, `run ${run + 1}, turn ${turn + 1}`);
+      const request = app.sent[start + turn];
+      assert.equal(request.workflowId, workflowId);
+      assert.equal(request.provider, ['chatgpt', 'claude', 'gemini', 'grok'][turn % 4]);
+      assert.ok(request.payload.text.includes(question));
+      for (const previousQuestion of previousQuestions) assert.equal(request.payload.text.includes(previousQuestion), false);
+      for (let previousRun = 0; previousRun < run; previousRun += 1) {
+        assert.equal(request.payload.text.includes(`RUN_${previousRun + 1}_ANSWER_`), false);
+      }
+      assert.doesNotMatch(request.payload.text, /\[Error:/);
+      app.complete(request, `RUN_${run + 1}_ANSWER_${turn + 1};`);
+    }
+    assert.equal((await running).ok, true);
+    assert.equal(app.pendingResponseCount(), 0);
+    assert.equal(app.pendingTimerCount(), 0);
+    assert.equal(app.session.multiAiActiveWorkflow, undefined);
+    previousQuestions.push(question);
+    totalContributions += count;
+  }
+  assert.equal(totalContributions, 308);
+  assert.equal(app.sent.length, 308);
+  assert.equal(app.broadcasts.some((message) => message.action === 'STEP_RECOVERY_REQUIRED'), false);
+  t.diagnostic(`25 sequential synthetic workflows, 308 contributions, ${(performance.now() - startedAt).toFixed(1)} ms`);
 });
 
 test('worker restores standby at startup and repairs default Coding roles before sending', async (t) => {
@@ -415,7 +728,7 @@ test('Free does not add a system error when every target already delivered [Erro
   assert.equal(app.broadcasts.filter((message) => message.provider === 'system').length, 0);
   assert.equal(app.broadcasts.filter((message) => (
     message.action === 'RESPONSE_DONE' && String(message.payload).includes('Error:')
-  )).length, 0);
+  )).length, 2);
   assert.ok(app.broadcasts.some((message) => message.payload?.done === true));
 });
 
@@ -429,9 +742,9 @@ test('Free keeps a delivered [Error:] off the system channel when the other targ
   app.complete(app.sent.find((message) => message.provider === 'meta'));
   await running;
   assert.equal(app.broadcasts.filter((message) => message.provider === 'system').length, 0);
-  assert.equal(app.broadcasts.some((message) => (
+  assert.equal(app.broadcasts.filter((message) => (
     message.action === 'RESPONSE_DONE' && message.provider === 'chatgpt' && String(message.payload).includes('Error:')
-  )), false);
+  )).length, 1);
   assert.ok(app.broadcasts.some((message) => message.payload?.done === true && message.payload?.cancelled !== true));
 });
 
@@ -447,12 +760,12 @@ test('Free all-fail reports only the undelivered Meta error as a system message'
   const systemErrors = app.broadcasts.filter((message) => message.provider === 'system');
   assert.equal(systemErrors.length, 1);
   assert.equal(decodeError(String(systemErrors[0]?.payload))?.key, 'error.tab_closed');
-  assert.equal(app.broadcasts.some((message) => (
+  assert.equal(app.broadcasts.filter((message) => (
     message.action === 'RESPONSE_DONE' && message.provider === 'chatgpt' && String(message.payload).includes('Error:')
-  )), false);
+  )).length, 1);
 });
 
-test('Debate with Meta as pro stays serial and does not open roundtable recovery', async (t) => {
+test('Debate with Meta as pro retries only its failed stage with a fresh request identity', async (t) => {
   const app = worker({ standbyProvider: 'grok' }, false);
   t.after(app.close);
   await app.ready;
@@ -460,10 +773,17 @@ test('Debate with Meta as pro stays serial and does not open roundtable recovery
   await waitUntil(() => app.sent.length === 1, 'Meta debate opening turn');
   assert.equal(app.sent[0].provider, 'meta');
   app.fail(app.sent[0], '[Error: quota]');
-  await running;
-  assert.equal(app.sent.length, 1);
-  assert.equal(app.broadcasts.some((message) => message.action === 'STEP_RECOVERY_REQUIRED'), false);
-  assert.ok(app.broadcasts.some((message) => message.provider === 'system'));
+  await waitUntil(() => app.broadcasts.some((message) => message.action === 'STEP_RECOVERY_REQUIRED'), 'Debate recovery');
+  const recovery = app.broadcasts.find((message) => message.action === 'STEP_RECOVERY_REQUIRED')!.payload;
+  assert.equal((await app.command({ action: 'RESOLVE_STEP_RECOVERY', payload: { ...recovery, action: 'retry' } })).ok, true);
+  await waitUntil(() => app.sent.length === 2, 'Debate retry');
+  assert.notEqual(app.sent[0].requestId, app.sent[1].requestId);
+  assert.equal(app.sent[0].payload.text, app.sent[1].payload.text);
+  await completeRemaining(app, running);
+  assert.deepEqual(app.sent.map((message) => message.provider), ['meta', 'meta', 'chatgpt', 'claude', 'gemini']);
+  assert.ok(app.broadcasts.some((message) => (
+    message.action === 'ROLE_ASSIGNMENT' && message.requestId === app.sent[1].requestId && message.payload?.labelKey === 'role.pro'
+  )));
 });
 
 test('Consult sends Meta and the other first seat in parallel before review', async (t) => {
@@ -501,6 +821,223 @@ test('Roundtable worker retries a failed Meta turn with a fresh request id', asy
   await completeRemaining(app, running);
   assert.equal(app.sent.length, 21);
   assert.equal(app.sent.filter((message) => message.provider === 'meta').length, 6);
+});
+
+for (const mode of ['debate', 'roundtable'] as const) {
+  test(`${mode} ignores responses from the wrong request, provider, workflow, tab or URL`, async (t) => {
+    const app = worker({}, false);
+    t.after(app.close);
+    await app.ready;
+    const roles = mode === 'debate'
+      ? { pro: 'chatgpt', con: 'claude', judge: 'gemini', summary: 'grok' } as DebateRoles
+      : { first: 'chatgpt', second: 'claude', third: 'gemini', fourth: 'grok' } as RoundtableRoles;
+    const running = app.send(mode, undefined, { roles });
+    await waitUntil(() => app.sent.length === 1, 'first turn');
+    const first = app.sent[0];
+    const original = { ...first, action: 'RESPONSE_DONE', payload: 'unattributed response' };
+    for (const action of ['RESPONSE_CHUNK', 'RESPONSE_DONE']) {
+      app.receive({ ...original, action, requestId: 'old-request' }, { tab: { id: first.tabId, url: AI_PROVIDERS.chatgpt.url } });
+      app.receive({ ...original, action, provider: 'claude' }, { tab: { id: first.tabId, url: AI_PROVIDERS.chatgpt.url } });
+      app.receive({ ...original, action, workflowId: crypto.randomUUID() }, { tab: { id: first.tabId, url: AI_PROVIDERS.chatgpt.url } });
+      app.receive({ ...original, action }, { tab: { id: first.tabId + 10, url: AI_PROVIDERS.chatgpt.url } });
+      app.receive({ ...original, action }, { tab: { id: first.tabId, url: 'https://example.com/' } });
+      app.receive({ ...original, action }, {});
+    }
+    await flushWorkerTurns();
+    assert.equal(app.sent.length, 1);
+    assert.equal(app.broadcasts.some((message) => message.payload === original.payload), false);
+    app.receive({ ...original, action: 'RESPONSE_CHUNK', payload: 'current partial' }, { tab: { id: first.tabId, url: AI_PROVIDERS.chatgpt.url } });
+    app.complete(first, 'current answer');
+    app.complete(first, 'duplicate answer');
+    await waitUntil(() => app.sent.length === 2, 'second turn');
+    assert.match(app.sent[1].payload.text, /current answer/);
+    assert.doesNotMatch(app.sent[1].payload.text, /unattributed response/);
+    assert.deepEqual(app.broadcasts.filter((message) => message.requestId === first.requestId && /^RESPONSE_/.test(message.action)).map((message) => message.payload), ['current partial', 'current answer']);
+    app.complete(first, 'late answer');
+    await flushWorkerTurns();
+    assert.equal(app.broadcasts.some((message) => message.payload === 'late answer'), false);
+    assert.equal(app.broadcasts.some((message) => message.payload === 'duplicate answer'), false);
+    await completeRemaining(app, running);
+    assert.equal(app.sent.length, mode === 'debate' ? 4 : 20);
+  });
+}
+
+test('accepted response chunks and completion are relayed in order before the next Debate stage', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  const running = app.send('debate');
+  await waitUntil(() => app.sent.length === 1, 'first turn');
+  const first = app.sent[0];
+  let release: (() => void) | undefined;
+  let held = false;
+  app.holdBroadcasts(async (message) => {
+    if (message.action !== 'RESPONSE_CHUNK') return;
+    held = true;
+    await new Promise<void>((resolve) => { release = resolve; });
+  });
+  app.receive({ ...first, action: 'RESPONSE_CHUNK', payload: 'partial' }, { tab: { id: first.tabId, url: AI_PROVIDERS[first.provider as AIProvider].url } });
+  app.complete(first, 'final');
+  await waitUntil(() => held, 'response relay held');
+  await flushWorkerTurns();
+  assert.equal(app.sent.length, 1);
+  release?.();
+  app.holdBroadcasts();
+  await waitUntil(() => app.sent.length === 2, 'next Debate stage');
+  const responseActions = app.broadcasts.filter((message) => message.requestId === first.requestId && /^RESPONSE_/.test(message.action));
+  assert.deepEqual(responseActions.map((message) => message.action), ['RESPONSE_CHUNK', 'RESPONSE_DONE']);
+  await completeRemaining(app, running);
+});
+
+for (const failedAt of [1, 2, 3, 4]) {
+  test(`Debate skips failed stage ${failedAt} without forwarding its quota error`, async (t) => {
+    const app = worker({}, false);
+    t.after(app.close);
+    await app.ready;
+    const running = app.send('debate');
+    for (let index = 0; index < failedAt - 1; index += 1) {
+      await waitUntil(() => app.sent.length > index, 'prior Debate stage');
+      app.complete(app.sent[index], `argument-${index + 1}`);
+    }
+    await waitUntil(() => app.sent.length === failedAt, 'failed Debate stage');
+    app.fail(app.sent[failedAt - 1], '[Error: explicit quota failure]');
+    await waitUntil(() => app.broadcasts.some((message) => message.action === 'STEP_RECOVERY_REQUIRED'), 'Debate skip recovery');
+    const recovery = app.broadcasts.find((message) => message.action === 'STEP_RECOVERY_REQUIRED')!.payload;
+    assert.equal((await app.command({ action: 'RESOLVE_STEP_RECOVERY', payload: { ...recovery, action: 'skip' } })).ok, true);
+    await completeRemaining(app, running);
+    assert.equal(app.sent.length, 4);
+    assert.equal(app.sent.slice(failedAt).some((message) => /explicit quota failure/.test(message.payload.text)), false);
+    if (failedAt < 4) assert.match(app.sent[failedAt].payload.text, /no response.*skipped/);
+  });
+}
+
+test('Debate recovery cancel stops the failed stage and does not start another provider', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  const running = app.send('debate');
+  await waitUntil(() => app.sent.length === 1, 'Debate before cancel');
+  app.fail(app.sent[0]);
+  await waitUntil(() => app.broadcasts.some((message) => message.action === 'STEP_RECOVERY_REQUIRED'), 'Debate cancel recovery');
+  const recovery = app.broadcasts.find((message) => message.action === 'STEP_RECOVERY_REQUIRED')!.payload;
+  assert.equal((await app.command({ action: 'RESOLVE_STEP_RECOVERY', payload: { ...recovery, action: 'cancel' } })).ok, true);
+  await running;
+  assert.equal(app.sent.length, 1);
+  assert.ok(app.stops.some((message) => message.requestId === app.sent[0].requestId && message.workflowId === app.sent[0].workflowId));
+  assert.ok(app.broadcasts.some((message) => message.payload?.done && message.payload?.cancelled));
+});
+
+test('old workflow cleanup cannot erase a new session workflow marker', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  const first = app.send('free', ['chatgpt']);
+  await waitUntil(() => app.sent.length === 1, 'first request');
+  let release: (() => void) | undefined;
+  let held = 0;
+  app.holdSessionGets(async () => {
+    held += 1;
+    if (held === 1) await new Promise<void>((resolve) => { release = resolve; });
+  });
+  app.complete(app.sent[0]);
+  await waitUntil(() => held === 1, 'old marker cleanup read');
+  const secondId = crypto.randomUUID();
+  const second = app.send('free', ['claude'], { workflowId: secondId, sessionId: 'new-session' });
+  await flushWorkerTurns();
+  release?.();
+  app.holdSessionGets();
+  await waitUntil(() => app.sent.length === 2, 'new session request');
+  await first;
+  assert.equal((app.session.multiAiActiveWorkflow as { workflowId?: string } | undefined)?.workflowId, secondId);
+  await completeRemaining(app, second);
+});
+
+test('an empty Debate completion opens recovery rather than becoming an argument', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  const running = app.send('debate');
+  await waitUntil(() => app.sent.length === 1, 'Debate before empty completion');
+  app.complete(app.sent[0], '  ');
+  await waitUntil(() => app.broadcasts.some((message) => message.action === 'STEP_RECOVERY_REQUIRED'), 'empty completion recovery');
+  assert.equal(app.sent.length, 1);
+  const recovery = app.broadcasts.find((message) => message.action === 'STEP_RECOVERY_REQUIRED')!.payload;
+  assert.equal(decodeError(recovery.reason)?.key, 'error.no_response_text');
+  assert.equal((await app.command({ action: 'RESOLVE_STEP_RECOVERY', payload: { ...recovery, action: 'cancel' } })).ok, true);
+  await running;
+});
+
+test('cancelling during a held response relay stops its exact request without advancing Debate', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  const running = app.send('debate');
+  await waitUntil(() => app.sent.length === 1, 'Debate request before held relay');
+  const first = app.sent[0];
+  let release: (() => void) | undefined;
+  let held = false;
+  app.holdBroadcasts(async (message) => {
+    if (message.action !== 'RESPONSE_CHUNK') return;
+    held = true;
+    await new Promise<void>((resolve) => { release = resolve; });
+  });
+  app.receive({ ...first, action: 'RESPONSE_CHUNK', payload: 'partial' }, { tab: { id: first.tabId, url: AI_PROVIDERS[first.provider as AIProvider].url } });
+  app.complete(first, 'final');
+  await waitUntil(() => held, 'chunk relay held');
+  assert.equal((await app.command({ action: 'CANCEL_WORKFLOW', payload: {
+    workflowId: first.workflowId, sessionId: 'session', clientId: 'client',
+  } })).ok, true);
+  await running;
+  release?.();
+  app.holdBroadcasts();
+  await flushWorkerTurns();
+  assert.equal(app.sent.length, 1);
+  assert.ok(app.stops.some((message) => message.requestId === first.requestId));
+  assert.equal(app.broadcasts.some((message) => message.action === 'RESPONSE_DONE' && message.requestId === first.requestId), false);
+});
+
+test('Roundtable runs five ordered rounds of four seats and a later Debate has fresh prompt history', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  const roles: RoundtableRoles = { first: 'chatgpt', second: 'claude', third: 'gemini', fourth: 'grok' };
+  const running = app.send('roundtable', undefined, { roles, text: 'ROUND_TABLE_QUESTION' });
+  const participants = Object.values(roles);
+  for (let index = 0; index < 20; index += 1) {
+    await waitUntil(() => app.sent.length === index + 1, `Roundtable logical turn ${index + 1}`);
+    const request = app.sent[index];
+    assert.equal(request.provider, participants[index % 4]);
+    assert.match(request.payload.text, /ROUND_TABLE_QUESTION/);
+    for (let previous = 0; previous < index; previous += 1) {
+      assert.ok(request.payload.text.includes(`round-answer-${previous + 1};`));
+    }
+    assert.equal(request.payload.text.includes(`round-answer-${index + 1};`), false);
+    const assignment = app.broadcasts.find((message) => message.action === 'ROLE_ASSIGNMENT' && message.requestId === request.requestId);
+    assert.equal(assignment?.payload?.labelKey, `round.${Math.floor(index / 4) + 1}`);
+    app.complete(request, `round-answer-${index + 1};`);
+  }
+  await running;
+  assert.equal(new Set(app.sent.map((message) => message.requestId)).size, 20);
+  const debating = app.send('debate', undefined, { text: 'DEBATE_ONLY_QUESTION', sessionId: 'other-session' });
+  await completeRemaining(app, debating);
+  assert.equal(app.sent.length, 24);
+  for (const request of app.sent.slice(20)) {
+    assert.match(request.payload.text, /DEBATE_ONLY_QUESTION/);
+    assert.doesNotMatch(request.payload.text, /ROUND_TABLE_QUESTION|round-answer-/);
+  }
+});
+
+test('ordinary provider prose about quota is forwarded as an argument without recovery', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  const running = app.send('debate');
+  await waitUntil(() => app.sent.length === 1, 'Debate before quota policy argument');
+  app.complete(app.sent[0], 'A fair quota policy can reduce congestion.');
+  await waitUntil(() => app.sent.length === 2, 'Con receives ordinary quota prose');
+  assert.match(app.sent[1].payload.text, /A fair quota policy can reduce congestion\./);
+  assert.equal(app.broadcasts.some((message) => message.action === 'STEP_RECOVERY_REQUIRED'), false);
+  await completeRemaining(app, running);
 });
 
 test('Roundtable worker skip and cancel keep Meta errors out of later prompts', async (t) => {
@@ -846,14 +1383,14 @@ test('a Send started during interrupted-workflow lookup keeps the new run marker
     void app.command({ action: 'GET_CONNECTIONS', payload: { clientId: 'panel-2', sessionId: 'session' } });
     await waitUntil(() => heldGets === 1, 'interrupted workflow lookup held');
     running = app.send('free', ['meta'], { workflowId: nextId, clientId: 'panel-2' });
-    await waitUntil(
-      () => (app.session.multiAiActiveWorkflow as { workflowId?: string } | undefined)?.workflowId === nextId,
-      'new workflow persisted during lookup',
-    );
+    await flushWorkerTurns();
     releaseGet?.();
     releaseGet = undefined;
     app.holdSessionGets();
-    await flushWorkerTurns();
+    await waitUntil(
+      () => (app.session.multiAiActiveWorkflow as { workflowId?: string } | undefined)?.workflowId === nextId,
+      'new workflow persisted after serialized lookup',
+    );
     assert.equal(
       (app.session.multiAiActiveWorkflow as { workflowId?: string } | undefined)?.workflowId,
       nextId,

@@ -154,11 +154,8 @@ export class StepRecoveryReplayCoordinator {
   }
 }
 
-export interface RoundtableWorkflowDependencies {
+export interface RecoverableWorkflowDependencies {
   checkAborted: (workflowId: string) => void;
-  providerName: (participant: AIProvider) => string;
-  buildPrompt: (text: string, round: number, participantName: string, history: RoundtableHistoryItem[]) => string;
-  sendStatus: (round: number, participant: AIProvider) => Promise<void>;
   createRequestId: (participant: AIProvider, workflowId: string) => string;
   sendRoleAssignment: (participant: AIProvider, labelKey: string, requestId: string) => Promise<void>;
   sendAndWait: (participant: AIProvider, prompt: string, workflowId: string, requestId: string) => Promise<string>;
@@ -170,6 +167,12 @@ export interface RoundtableWorkflowDependencies {
   ) => Promise<StepRecoveryAction>;
   resetProvider: (participant: AIProvider, failedRequestId: string, workflowId: string) => Promise<void>;
   cancelWorkflow: (workflowId: string) => Promise<void>;
+}
+
+export interface RoundtableWorkflowDependencies extends RecoverableWorkflowDependencies {
+  providerName: (participant: AIProvider) => string;
+  buildPrompt: (text: string, round: number, participantName: string, history: RoundtableHistoryItem[]) => string;
+  sendStatus: (round: number, participant: AIProvider) => Promise<void>;
 }
 
 export async function runRoundtableWorkflow(
@@ -188,19 +191,19 @@ export async function runRoundtableWorkflow(
       const labelKey = `round.${round}`;
       const participantName = dependencies.providerName(participant);
       const prompt = dependencies.buildPrompt(text, round, participantName, history);
-      const response = await runRecoverableRoundtableStep(participant, prompt, workflowId, labelKey, dependencies);
+      const response = await runRecoverableWorkflowStep(participant, prompt, workflowId, labelKey, dependencies);
       history.push({ name: participantName, round, text: response });
     }
   }
   return history;
 }
 
-async function runRecoverableRoundtableStep(
+export async function runRecoverableWorkflowStep(
   participant: AIProvider,
   prompt: string,
   workflowId: string,
   labelKey: string,
-  dependencies: RoundtableWorkflowDependencies,
+  dependencies: RecoverableWorkflowDependencies,
 ): Promise<string> {
   for (;;) {
     dependencies.checkAborted(workflowId);

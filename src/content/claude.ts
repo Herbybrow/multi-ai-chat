@@ -37,10 +37,11 @@ createContentScript({
   ],
 
   loginDetector: () => {
-    return !!(
+    // Missing markup can mean loading, navigation or usage gating, not logout.
+    return (
       document.querySelector('.ProseMirror[contenteditable="true"]') ||
       document.querySelector('[contenteditable="true"].ProseMirror')
-    );
+    ) ? true : null;
   },
 
   // Detect if Claude is still generating (streaming indicator or stop button)

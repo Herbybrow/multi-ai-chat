@@ -49,11 +49,12 @@ createContentScript({
   ],
 
   loginDetector: () => {
-    return !!(
+    // Missing markup can mean loading, navigation or usage gating, not logout.
+    return (
       document.querySelector('.ql-editor[contenteditable="true"]') ||
       document.querySelector('rich-textarea [contenteditable="true"]') ||
       document.querySelector('div[contenteditable="true"][aria-label="Enter a prompt here"]')
-    );
+    ) ? true : null;
   },
 
   // Detect if Gemini is still generating (thinking indicator or stop button)

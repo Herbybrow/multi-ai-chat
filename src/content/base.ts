@@ -32,6 +32,7 @@ export interface ContentScriptConfig {
   sendButtonFilter?: (element: Element) => boolean;
   userMessageSelectors?: string[];
   userMessageTracking?: 'element-identity' | 'semantic-count';
+  sendConfirmation?: 'heuristic' | 'matching-user-message';
   requireSameComposerForClearConfirmation?: boolean;
   responseSelectors: string[];
   responseTracking?: 'element-identity' | 'semantic-latest';
@@ -56,6 +57,20 @@ interface SendActivationResult {
   ok: boolean;
   path: 'button-click' | 'enter-key';
   detail?: string;
+  errorKey?: string;
+}
+
+interface SettledRequestIdentity {
+  requestId?: string;
+  workflowId?: string;
+  dispatched: boolean;
+}
+
+interface CancelledRequestCleanup extends SettledRequestIdentity {
+  generation: number;
+  deadline: number;
+  stopActivated: boolean;
+  timer?: number;
 }
 
 const INPUT_RETRY_MS = 250;
@@ -65,6 +80,8 @@ const PRE_SEND_DELAY_MS = 800;
 const SEND_RETRY_DELAY_MS = 1500;
 const SEND_CONFIRMATION_GRACE_MS = 2000;
 const SEND_VERIFY_DELAY_MS = 1500;
+const STRICT_SEND_CONFIRMATION_TIMEOUT_MS = 10_000;
+const CANCELLED_SEND_CLEANUP_TIMEOUT_MS = 10_000;
 // 送出成功但完全抓不到回應時，至少等這麼久才放棄。慢的模型（深度思考、搜尋）
 // 常常好幾十秒才吐出第一個字，而 isThinking() 只靠硬寫的選擇器，漏判是常態。
 // notes: 固定 2 分鐘，遠短於背景的 600 秒逾時；若真出現更慢的模型再拉長
@@ -93,6 +110,7 @@ export function createContentScript(config: ContentScriptConfig): void {
     anchorSemanticResponsesAfterMatchingUserMessage = false,
     responseContentRoot = (response) => response,
     userMessageTracking = 'element-identity',
+    sendConfirmation = 'heuristic',
     loginDetector,
     loggedOutDetector = () => false,
     loginLossDelay = 0,
@@ -127,7 +145,9 @@ export function createContentScript(config: ContentScriptConfig): void {
   let lastActivatedInput: Element | undefined;
   let disposed = false;
   let responseGeneration = 0;
-  let failedRequestTombstone: { requestId?: string; workflowId?: string } | undefined;
+  let failedRequestTombstone: SettledRequestIdentity | undefined;
+  let sendDispatched = false;
+  let cancelledRequestCleanup: CancelledRequestCleanup | undefined;
   const sendTimeouts = new Set<number>();
 
   const queryInput = (): Element | null => queryFirst(
@@ -135,6 +155,11 @@ export function createContentScript(config: ContentScriptConfig): void {
     document,
     requireVisibleInput,
     inputFilter,
+  );
+  const inputTextMatches = (input: Element, text: string): boolean => (
+    sendConfirmation === 'matching-user-message'
+      ? composerTextExactlyMatches(input, text)
+      : composerTextMatches(input, text)
   );
 
   function isContextValid(): boolean {
@@ -163,6 +188,7 @@ export function createContentScript(config: ContentScriptConfig): void {
     activePromptText = '';
     lastActivatedInput = undefined;
     failedRequestTombstone = undefined;
+    clearCancelledRequestCleanup();
     clearResponseTimers();
     if (statusInterval !== undefined) clearInterval(statusInterval);
     statusInterval = undefined;
@@ -205,13 +231,13 @@ export function createContentScript(config: ContentScriptConfig): void {
     if (!text.trim()) throw new Error(encodeError('error.empty_message'));
     if (waitingForResponse) throw new Error(encodeError('error.response_in_progress', { provider }));
 
-    const input = await retryLookup(queryInput, INPUT_TIMEOUT_MS, isContextValid);
-    if (!input) {
-      const reason = encodeError('error.input_not_found', { provider });
-      finishWithError(reason, requestId, workflowId);
-      throw new Error(reason);
-    }
-
+    // Reserve ownership before the first await so lookup is cancellable and concurrent
+    // commands cannot both enter this provider's editor.
+    clearCancelledRequestCleanup();
+    const generation = ++responseGeneration;
+    waitingForResponse = true;
+    activeRequestId = requestId;
+    activeWorkflowId = workflowId;
     const existingResponses = queryResponses();
     responseBaselineEls = new Set(existingResponses);
     matchingUserMessageElement = undefined;
@@ -219,19 +245,16 @@ export function createContentScript(config: ContentScriptConfig): void {
       querySemanticResponses(),
       extractResponseText,
     );
-    responseGeneration += 1;
     userMessageBaselineEls = new Set(queryUserMessages());
     matchingUserMessageBaselineCount = matchingPromptCount(
-      Array.from(userMessageBaselineEls, (element) => element.textContent ?? ''),
+      Array.from(userMessageBaselineEls, userMessageText),
       text,
     );
     sawMatchingUserMessage = false;
-    waitingForResponse = true;
-    activeRequestId = requestId;
-    activeWorkflowId = workflowId;
     // This SEND is now the active request. Recovery always consumes a settled failure's
     // tombstone before starting Retry, and no older cleanup may target this newer request.
     failedRequestTombstone = undefined;
+    sendDispatched = false;
     lastResponseText = '';
     sawGenerationActivity = false;
     responseWaitStartedAt = Date.now();
@@ -239,120 +262,173 @@ export function createContentScript(config: ContentScriptConfig): void {
     lastActivatedInput = undefined;
     startResponsePolling();
 
+    const input = await retryLookup(queryInput, INPUT_TIMEOUT_MS, () => isActiveRequest(requestId, generation));
+    if (!isActiveRequest(requestId, generation)) throw new Error('request cancelled during input lookup');
+    if (!input) {
+      const reason = encodeError('error.input_not_found', { provider });
+      finishWithError(reason, requestId, workflowId, generation);
+      throw new Error(reason);
+    }
+    if (sendConfirmation === 'matching-user-message' && getInputText(input).trim()
+      && !inputTextMatches(input, text)) {
+      const reason = encodeError('error.existing_draft', { provider });
+      finishWithError(reason, requestId, workflowId, generation);
+      throw new Error(reason);
+    }
+
     const injectionStartedAt = Date.now();
     try {
-      if (!isActiveRequest(requestId)) throw new Error('request cancelled before input injection');
-      await injectInput(input, text);
+      if (!isActiveRequest(requestId, generation)) throw new Error('request cancelled before input injection');
+      if (sendConfirmation !== 'matching-user-message' || !inputTextMatches(input, text)) {
+        await injectInput(input, text);
+      }
       await Promise.resolve();
-      if (!isActiveRequest(requestId)) throw new Error('request cancelled during input injection');
-      assertInputLanded(input, text);
+      if (!isActiveRequest(requestId, generation)) throw new Error('request cancelled during input injection');
+      assertInputLanded(input, text, sendConfirmation === 'matching-user-message');
     } catch (error) {
-      finishWithError(encodeError('error.input_injection_failed', { provider, detail: errorMessage(error) }), requestId, workflowId);
+      finishWithError(encodeError('error.input_injection_failed', { provider, detail: errorMessage(error) }), requestId, workflowId, generation);
       throw error;
     }
 
     const delay = Math.max(0, PRE_SEND_DELAY_MS - (Date.now() - injectionStartedAt));
     scheduleForRequest(() => {
       void (async () => {
-        const firstAttempt = await activateSend(text, requestId);
+        const firstAttempt = await activateSend(text, requestId, generation);
+        if (!isActiveRequest(requestId, generation)) return;
+        if (sendConfirmation === 'matching-user-message') {
+          if (!firstAttempt.ok) {
+            finishWithError(encodeError(firstAttempt.errorKey ?? 'error.send_failed', {
+              provider, ...(firstAttempt.detail ? { detail: firstAttempt.detail } : {}),
+            }), requestId, workflowId, generation);
+            return;
+          }
+          // A dispatched click is uncertain until the provider renders our user turn.
+          // Never refill or activate again while an earlier action may still be accepted.
+          scheduleForRequest(() => {
+            if (sendStarted()) return;
+            finishWithError(encodeError('error.send_unconfirmed', { provider }), requestId, workflowId, generation);
+          }, STRICT_SEND_CONFIRMATION_TIMEOUT_MS, requestId, generation);
+          return;
+        }
         scheduleForRequest(
-          () => void retrySendIfStillPending(text, firstAttempt, requestId),
+          () => void retrySendIfStillPending(text, firstAttempt, requestId, generation),
           SEND_RETRY_DELAY_MS,
           requestId,
+          generation,
         );
       })();
-    }, delay, requestId);
+    }, delay, requestId, generation);
   }
 
-  async function retrySendIfStillPending(text: string, firstAttempt: SendActivationResult, requestId?: string): Promise<void> {
-    if (!isActiveRequest(requestId) || sendStarted()) return;
-    if (firstAttempt.ok && await waitForSendConfirmation(requestId, SEND_CONFIRMATION_GRACE_MS)) return;
-    if (!isActiveRequest(requestId)) return;
-    const retryAttempt = await activateSend(text, requestId);
-    if (!isActiveRequest(requestId)) return;
+  async function retrySendIfStillPending(text: string, firstAttempt: SendActivationResult, requestId: string | undefined, generation: number): Promise<void> {
+    if (!isActiveRequest(requestId, generation) || sendStarted()) return;
+    if (firstAttempt.ok && await waitForSendConfirmation(requestId, SEND_CONFIRMATION_GRACE_MS, generation)) return;
+    if (!isActiveRequest(requestId, generation)) return;
+    const retryAttempt = await activateSend(text, requestId, generation);
+    if (!isActiveRequest(requestId, generation)) return;
     if (!retryAttempt.ok) {
       finishWithError(encodeError('error.send_failed', { provider, detail: retryAttempt.detail ?? firstAttempt.detail ?? retryAttempt.path }));
       return;
     }
     scheduleForRequest(
-      () => void verifySendAfterRetry(text, requestId),
+      () => void verifySendAfterRetry(text, requestId, generation),
       SEND_VERIFY_DELAY_MS,
       requestId,
+      generation,
     );
   }
 
-  async function waitForSendConfirmation(requestId: string | undefined, timeoutMs: number): Promise<boolean> {
+  async function waitForSendConfirmation(requestId: string | undefined, timeoutMs: number, generation: number): Promise<boolean> {
     const startedAt = Date.now();
-    while (isActiveRequest(requestId) && Date.now() - startedAt < timeoutMs) {
+    while (isActiveRequest(requestId, generation) && Date.now() - startedAt < timeoutMs) {
       await new Promise((resolve) => setTimeout(resolve, 100));
-      if (isActiveRequest(requestId) && sendStarted()) return true;
+      if (isActiveRequest(requestId, generation) && sendStarted()) return true;
     }
     return false;
   }
 
-  async function verifySendAfterRetry(text: string, requestId?: string): Promise<void> {
-    if (!isActiveRequest(requestId) || sendStarted()) return;
-    if (await waitForSendConfirmation(requestId, SEND_CONFIRMATION_GRACE_MS)) return;
-    if (!isActiveRequest(requestId)) return;
+  async function verifySendAfterRetry(text: string, requestId: string | undefined, generation: number): Promise<void> {
+    if (!isActiveRequest(requestId, generation) || sendStarted()) return;
+    if (await waitForSendConfirmation(requestId, SEND_CONFIRMATION_GRACE_MS, generation)) return;
+    if (!isActiveRequest(requestId, generation)) return;
     let currentInput: Element | null;
     try {
-      currentInput = await prepareLiveInput(text, requestId);
+      currentInput = await prepareLiveInput(text, requestId, generation);
     } catch (error) {
-      finishWithError(encodeError('error.send_failed', { provider, detail: errorMessage(error) }));
+      finishWithError(encodeError('error.send_failed', { provider, detail: errorMessage(error) }), requestId, activeWorkflowId, generation);
       return;
     }
-    if (!isActiveRequest(requestId)) return;
+    if (!isActiveRequest(requestId, generation)) return;
     if (!currentInput) {
       finishWithError(encodeError('error.input_disappeared', { provider }));
       return;
     }
     lastActivatedInput = currentInput;
     const enterOk = dispatchEnter(currentInput);
+    if (enterOk) sendDispatched = true;
     if (!enterOk) {
       finishWithError(encodeError('error.send_failed', { provider, detail: 'Enter dispatch failed' }));
       return;
     }
     scheduleForRequest(() => {
-      if (!isActiveRequest(requestId) || sendStarted()) return;
+      if (!isActiveRequest(requestId, generation) || sendStarted()) return;
       finishWithError(encodeError('error.send_rejected', { provider }));
-    }, SEND_VERIFY_DELAY_MS, requestId);
+    }, SEND_VERIFY_DELAY_MS, requestId, generation);
   }
 
-  async function activateSend(text: string, requestId?: string): Promise<SendActivationResult> {
+  async function activateSend(text: string, requestId: string | undefined, generation: number): Promise<SendActivationResult> {
     let input: Element | null;
     try {
-      input = await prepareLiveInput(text, requestId);
+      input = await prepareLiveInput(text, requestId, generation);
     } catch (error) {
-      return { ok: false, path: 'enter-key', detail: errorMessage(error) };
+      const detail = errorMessage(error);
+      return { ok: false, path: 'enter-key', detail,
+        errorKey: sendConfirmation === 'matching-user-message' && detail === 'live editor contains different text'
+          ? 'error.existing_draft' : undefined };
     }
     if (!input) return { ok: false, path: 'enter-key', detail: 'input disappeared' };
     lastActivatedInput = input;
     const sendButton = await retryLookup(
       () => querySendButton(input),
       SEND_BUTTON_TIMEOUT_MS,
-      () => isActiveRequest(requestId),
+      () => isActiveRequest(requestId, generation),
     );
-    if (!isActiveRequest(requestId)) return { ok: false, path: 'enter-key', detail: 'request cancelled' };
-    if (sendButton && !isDisabled(sendButton) && clickElement(sendButton)) return { ok: true, path: 'button-click' };
+    if (!isActiveRequest(requestId, generation)) return { ok: false, path: 'enter-key', detail: 'request cancelled' };
+    if (sendConfirmation === 'matching-user-message') {
+      if (sendStarted()) return { ok: true, path: 'button-click' };
+      if (queryInput() !== input || !inputTextMatches(input, text)) {
+        return { ok: false, path: 'button-click', errorKey: 'error.send_unconfirmed' };
+      }
+      if (!sendButton) return { ok: false, path: 'button-click', errorKey: 'error.send_action_unavailable' };
+      if (isDisabled(sendButton)) return { ok: false, path: 'button-click', errorKey: 'error.send_action_disabled' };
+      sendDispatched = true;
+      const ok = clickElement(sendButton);
+      return { ok, path: 'button-click', detail: ok ? undefined : 'send control could not be activated' };
+    }
+    if (sendButton && !isDisabled(sendButton) && clickElement(sendButton)) {
+      sendDispatched = true;
+      return { ok: true, path: 'button-click' };
+    }
     const ok = dispatchEnter(input);
+    if (ok) sendDispatched = true;
     return { ok, path: 'enter-key', detail: ok ? undefined : 'Enter dispatch failed' };
   }
 
-  async function prepareLiveInput(text: string, requestId?: string): Promise<Element | null> {
-    if (!isActiveRequest(requestId)) return null;
+  async function prepareLiveInput(text: string, requestId: string | undefined, generation: number): Promise<Element | null> {
+    if (!isActiveRequest(requestId, generation)) return null;
     const input = await retryLookup(
       queryInput,
       INPUT_TIMEOUT_MS,
-      () => isActiveRequest(requestId),
+      () => isActiveRequest(requestId, generation),
     );
-    if (!input || !isActiveRequest(requestId)) return null;
-    if (composerTextMatches(input, text)) return input;
+    if (!input || !isActiveRequest(requestId, generation)) return null;
+    if (inputTextMatches(input, text)) return input;
     if (getInputText(input).trim()) throw new Error('live editor contains different text');
-    if (!isActiveRequest(requestId)) return null;
+    if (!isActiveRequest(requestId, generation)) return null;
     await injectInput(input, text);
     await Promise.resolve();
-    if (!isActiveRequest(requestId)) return null;
-    assertInputLanded(input, text);
+    if (!isActiveRequest(requestId, generation)) return null;
+    assertInputLanded(input, text, sendConfirmation === 'matching-user-message');
     return input;
   }
 
@@ -370,6 +446,10 @@ export function createContentScript(config: ContentScriptConfig): void {
     return selectors.length ? Array.from(document.querySelectorAll(selectors.join(', '))) : [];
   }
 
+  function userMessageText(element: Element): string {
+    return (element as HTMLElement).innerText || element.textContent || '';
+  }
+
   function hasNewMatchingUserMessage(): boolean {
     if (sawMatchingUserMessage) {
       if (!anchorSemanticResponsesAfterMatchingUserMessage || matchingUserMessageElement?.isConnected) {
@@ -383,7 +463,7 @@ export function createContentScript(config: ContentScriptConfig): void {
     const messages = queryUserMessages();
     if (userMessageTracking === 'semantic-count') {
       const matchingMessages = messages.filter((element) => (
-        contentMatchesPrompt(element.textContent ?? '', activePromptText)
+        contentMatchesPrompt(userMessageText(element), activePromptText)
       ));
       sawMatchingUserMessage = matchingMessages.length > matchingUserMessageBaselineCount;
       if (sawMatchingUserMessage) {
@@ -393,7 +473,7 @@ export function createContentScript(config: ContentScriptConfig): void {
     }
     matchingUserMessageElement = messages.find((element) => (
       !userMessageBaselineEls.has(element)
-      && contentMatchesPrompt(element.textContent ?? '', activePromptText)
+      && contentMatchesPrompt(userMessageText(element), activePromptText)
     ));
     sawMatchingUserMessage = Boolean(matchingUserMessageElement);
     return sawMatchingUserMessage;
@@ -401,6 +481,14 @@ export function createContentScript(config: ContentScriptConfig): void {
 
   function sendStarted(): boolean {
     if (!waitingForResponse) return true;
+    if (sendConfirmation === 'matching-user-message') {
+      const accepted = hasNewMatchingUserMessage();
+      if (accepted) {
+        sawGenerationActivity = true;
+        sendDispatched = true;
+      }
+      return accepted;
+    }
     if (isCurrentTurnThinking()) {
       sawGenerationActivity = true;
       return true;
@@ -539,6 +627,7 @@ export function createContentScript(config: ContentScriptConfig): void {
       if (!sawGenerationActivity || responseTimeout !== undefined) return;
       if (Date.now() - responseWaitStartedAt < NO_RESPONSE_GRACE_MS) return;
       scheduleResponseTimeout(() => {
+        if (isCurrentTurnThinking()) return;
         const finalText = getLatestResponseText();
         if (finalText) {
           lastResponseText = finalText;
@@ -560,7 +649,7 @@ export function createContentScript(config: ContentScriptConfig): void {
           if (!isCurrentResponseGeneration(generation)) return clearDoneCheck(timer);
           if (!isCurrentTurnThinking()) {
             clearDoneCheck(timer);
-            scheduleResponseTimeout(finishResponse, doneDelay, generation);
+            scheduleResponseTimeout(checkIfDone, doneDelay, generation);
           }
         }, 1000);
         checkDoneInterval = timer;
@@ -572,6 +661,10 @@ export function createContentScript(config: ContentScriptConfig): void {
 
   function finishResponse(generation = responseGeneration): void {
     if (!isCurrentResponseGeneration(generation)) return;
+    if (isCurrentTurnThinking()) {
+      checkIfDone(generation);
+      return;
+    }
     // Must re-read before resetResponseState(): the baseline filter keys off waitingForResponse.
     const text = longerResponseText(lastResponseText, getLatestResponseText());
     const requestId = activeRequestId;
@@ -581,12 +674,13 @@ export function createContentScript(config: ContentScriptConfig): void {
     safeSendMessage({ action: 'RESPONSE_DONE', provider, requestId, workflowId, payload: text });
   }
 
-  function finishWithError(reason: string, requestId = activeRequestId, workflowId = activeWorkflowId): void {
+  function finishWithError(reason: string, requestId = activeRequestId, workflowId = activeWorkflowId, generation = responseGeneration): void {
+    if (!isActiveRequest(requestId, generation) || workflowId !== activeWorkflowId) return;
     const settlesActiveRequest = waitingForResponse
       && requestId === activeRequestId
       && workflowId === activeWorkflowId;
     const failedRequest = settlesActiveRequest && (requestId !== undefined || workflowId !== undefined)
-      ? { requestId, workflowId }
+      ? { requestId, workflowId, dispatched: sendDispatched }
       : undefined;
     resetResponseState();
     // Recovery arrives after RESPONSE_DONE has settled the background waiter. Keep only this
@@ -606,22 +700,64 @@ export function createContentScript(config: ContentScriptConfig): void {
       requestId,
       workflowId,
     )) return false;
+    const stoppedRequest = waitingForResponse
+      ? { requestId: activeRequestId, workflowId: activeWorkflowId, dispatched: sendDispatched }
+      : failedRequestTombstone;
     const stopButton = queryFirst(
       config.stopButtonSelectors ?? [],
       document,
       true,
       config.stopButtonFilter,
     );
-    if (stopButton) clickElement(stopButton);
+    const stopActivated = Boolean(stopButton && clickElement(stopButton));
     resetResponseState();
-    failedRequestTombstone = undefined;
+    failedRequestTombstone = sendConfirmation === 'matching-user-message' && stoppedRequest?.dispatched
+      ? stoppedRequest : undefined;
+    if (failedRequestTombstone) {
+      cancelledRequestCleanup = {
+        ...failedRequestTombstone,
+        generation: responseGeneration,
+        deadline: Date.now() + CANCELLED_SEND_CLEANUP_TIMEOUT_MS,
+        stopActivated,
+      };
+      pollCancelledRequestStop(cancelledRequestCleanup);
+    }
     return true;
+  }
+
+  function pollCancelledRequestStop(candidate: CancelledRequestCleanup): void {
+    if (cancelledRequestCleanup !== candidate) return;
+    if (!isContextValid() || waitingForResponse || responseGeneration !== candidate.generation
+      || failedRequestTombstone?.requestId !== candidate.requestId
+      || failedRequestTombstone?.workflowId !== candidate.workflowId) {
+      clearCancelledRequestCleanup();
+      return;
+    }
+    const stopButton = queryFirst(config.stopButtonSelectors ?? [], document, true, config.stopButtonFilter);
+    if (!stopButton && candidate.stopActivated) {
+      failedRequestTombstone = undefined;
+      clearCancelledRequestCleanup();
+      return;
+    }
+    if (Date.now() >= candidate.deadline) {
+      // Stop polling, but retain the exact identity for a later explicit scoped cleanup.
+      clearCancelledRequestCleanup();
+      return;
+    }
+    if (stopButton && !candidate.stopActivated) candidate.stopActivated = clickElement(stopButton);
+    candidate.timer = window.setTimeout(() => pollCancelledRequestStop(candidate), INPUT_RETRY_MS);
+  }
+
+  function clearCancelledRequestCleanup(): void {
+    if (cancelledRequestCleanup?.timer !== undefined) window.clearTimeout(cancelledRequestCleanup.timer);
+    cancelledRequestCleanup = undefined;
   }
 
   function resetResponseState(): void {
     waitingForResponse = false;
     responseGeneration += 1;
     clearResponseTimers();
+    clearCancelledRequestCleanup();
     responseBaselineEls.clear();
     semanticResponseBaseline = { count: 0, latestText: '' };
     userMessageBaselineEls.clear();
@@ -633,10 +769,11 @@ export function createContentScript(config: ContentScriptConfig): void {
     activePromptText = '';
     lastActivatedInput = undefined;
     sawGenerationActivity = false;
+    sendDispatched = false;
   }
 
-  function isActiveRequest(requestId?: string): boolean {
-    return isActiveContentRequest(
+  function isActiveRequest(requestId?: string, generation = responseGeneration): boolean {
+    return generation === responseGeneration && isActiveContentRequest(
       disposed,
       runtimeState,
       scope[marker],
@@ -646,10 +783,10 @@ export function createContentScript(config: ContentScriptConfig): void {
     );
   }
 
-  function scheduleForRequest(callback: () => void, delay: number, requestId = activeRequestId): void {
+  function scheduleForRequest(callback: () => void, delay: number, requestId = activeRequestId, generation = responseGeneration): void {
     const timer = window.setTimeout(() => {
       sendTimeouts.delete(timer);
-      if (isActiveRequest(requestId)) callback();
+      if (isActiveRequest(requestId, generation)) callback();
     }, delay);
     sendTimeouts.add(timer);
   }
@@ -756,10 +893,19 @@ function getInputText(input: Element): string {
   return input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement ? input.value : input.textContent ?? '';
 }
 
-function assertInputLanded(input: Element, expected: string): void {
+function assertInputLanded(input: Element, expected: string, exact = false): void {
   const actual = getInputText(input);
   if (!actual.trim()) throw new Error('editor remained empty');
-  if (!composerTextMatches(input, expected)) throw new Error('editor text did not match the requested prompt');
+  if (!(exact ? composerTextExactlyMatches(input, expected) : composerTextMatches(input, expected))) {
+    throw new Error('editor text did not match the requested prompt');
+  }
+}
+
+function composerTextExactlyMatches(input: Element, expected: string): boolean {
+  const actual = input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement
+    ? input.value : (input as HTMLElement).innerText || input.textContent || '';
+  const normalizeLineEndings = (value: string) => value.replace(/\r\n?/g, '\n');
+  return normalizeLineEndings(actual) === normalizeLineEndings(expected);
 }
 
 function composerTextMatches(input: Element, expected: string): boolean {

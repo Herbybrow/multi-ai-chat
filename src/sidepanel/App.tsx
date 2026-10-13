@@ -93,12 +93,6 @@ function newConversation(): Conversation {
   };
 }
 
-function answeredProvidersOf(messages: readonly ChatMessage[]): AIProvider[] {
-  return [...new Set(
-    messages.map((message) => message.provider).filter((provider): provider is AIProvider => Boolean(provider) && (provider as string) !== 'system'),
-  )];
-}
-
 // 錯誤在背景與 content script 只帶鍵值，這裡是唯一翻譯成使用者語言的地方。
 // 沒帶鍵值的（原生例外、HackMD 伺服器回應）原樣顯示。
 function humanizeError(text: string): string {
@@ -337,7 +331,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const listener = (message: { action: string; provider?: AIProvider; requestId?: string; workflowId?: string; payload?: unknown }) => {
+    const listener = (message: { action: string; provider?: AIProvider; requestId?: string; workflowId?: string; payload?: unknown }, sender: chrome.runtime.MessageSender = {}) => {
+      // Content events reach extension pages directly too. Only the background's
+      // validated relay may update the transcript or workflow controls.
+      if (sender.tab || (sender.id && sender.id !== chrome.runtime.id)) return;
       switch (message.action) {
         case 'PROVIDER_SELECTION_UPDATE': {
           const selection = message.payload as { standbyProvider?: unknown; freeTargets?: unknown };
@@ -481,6 +478,7 @@ export default function App() {
 
   const changeMode = (nextMode: ChatMode) => {
     if (isProcessing) return;
+    setContextNeedsReplay(Boolean(messages.length));
     setMode(nextMode);
     setShowRoleConfig(false);
     const nextRoles = nextMode !== 'free'
@@ -500,7 +498,7 @@ export default function App() {
     if (activeWorkflowIdRef.current) ignoreWorkflow(activeWorkflowIdRef.current, ignoredWorkflowIdsRef);
     const workflowScope = createWorkflowScope(activeConversationId, clientIdRef.current);
     activeWorkflowIdRef.current = workflowScope.workflowId;
-    const context = contextNeedsReplay ? buildConversationReplayContext(messages) : undefined;
+    const context = buildConversationReplayContext(messages, { includeAssistant: contextNeedsReplay });
     setMessages((current) => [...current, { id: `user-${crypto.randomUUID()}`, role: 'user', content: text, timestamp: Date.now() }]);
     setIsProcessing(true);
     setWorkflowStatus(null);
@@ -520,10 +518,13 @@ export default function App() {
         roles: mode === 'free' ? undefined : roles,
         targets: mode === 'free' ? freeTargets : undefined,
       },
+    }).then((response: { ok?: boolean; error?: string } | undefined) => {
+      if (response?.ok === false) throw new Error(response.error ?? 'The workflow was not accepted');
     }).catch((error) => {
       if (conversationRevisionRef.current !== revision || activeWorkflowIdRef.current !== workflowScope.workflowId
         || activeConversationIdRef.current !== workflowScope.sessionId) return;
       activeWorkflowIdRef.current = undefined;
+      setContextNeedsReplay(true);
       setMessages((current) => [...current, { id: `system-${crypto.randomUUID()}`, role: 'ai', provider: 'system' as AIProvider, content: `${ERROR_MARKER} ${String(error)}`, timestamp: Date.now() }]);
       setIsProcessing(false);
     });
@@ -600,7 +601,6 @@ export default function App() {
     conversationRevisionRef.current += 1;
     if (activeWorkflowIdRef.current) ignoreWorkflow(activeWorkflowIdRef.current, ignoredWorkflowIdsRef);
     activeWorkflowIdRef.current = undefined;
-    const leavingMessages = persistInputsRef.current.messages;
     const committed = commitCurrentConversation();
     // notes: 已經有空對話就重用它，只更新時間，避免堆出一串重複的「新對話」
     const reusable = committed.find((candidate) => !candidate.messages?.length);
@@ -635,7 +635,9 @@ export default function App() {
     closeDrawer();
     setConnectionsOpen(true);
     persistNow(nextConversations, conversation.id);
-    chrome.runtime.sendMessage({ action: 'RESET_PROVIDER_SESSIONS', payload: { providers: answeredProvidersOf(leavingMessages) } }).catch(() => {});
+    // A cancelled or rejected send may have changed a provider conversation even
+    // when it never produced an app transcript entry.
+    chrome.runtime.sendMessage({ action: 'RESET_PROVIDER_SESSIONS', payload: { providers: activeProviders(standbyProviderRef.current) } }).catch(() => {});
   };
 
   const selectConversation = (conversation: Conversation) => {
@@ -644,7 +646,6 @@ export default function App() {
     conversationRevisionRef.current += 1;
     if (activeWorkflowIdRef.current) ignoreWorkflow(activeWorkflowIdRef.current, ignoredWorkflowIdsRef);
     activeWorkflowIdRef.current = undefined;
-    const leavingMessages = persistInputsRef.current.messages;
     const committed = commitCurrentConversation();
     const nextRoles = repairRoles(conversation.roles ?? (conversation.mode === 'free' ? DEFAULT_DEBATE_ROLES : DEFAULT_ROLES[conversation.mode]), standbyProvider);
     persistInputsRef.current = {
@@ -667,7 +668,7 @@ export default function App() {
     persistNow(committed, conversation.id);
     const action = conversation.providerUrls && Object.keys(conversation.providerUrls).length
       ? { action: 'RESTORE_PROVIDER_SESSIONS', payload: { urls: conversation.providerUrls } }
-      : { action: 'RESET_PROVIDER_SESSIONS', payload: { providers: answeredProvidersOf(leavingMessages) } };
+      : { action: 'RESET_PROVIDER_SESSIONS', payload: { providers: activeProviders(standbyProviderRef.current) } };
     chrome.runtime.sendMessage(action).catch(() => {});
   };
 
@@ -710,6 +711,7 @@ export default function App() {
 
   const toggleTarget = (provider: AIProvider) => {
     if (isProcessing) return;
+    setContextNeedsReplay(Boolean(messages.length));
     setFreeTargets((current) => {
       const next = current.includes(provider) ? current.filter((candidate) => candidate !== provider) : [...current, provider];
       const safeNext = next.length ? next : [provider];
@@ -722,8 +724,15 @@ export default function App() {
     if (!hydrated || isProcessing || mode !== 'free') return;
     const targets = readyActiveTargets(connections, standbyProviderRef.current);
     if (!targets.length) return;
+    setContextNeedsReplay(Boolean(messages.length));
     setFreeTargets(targets);
     void chrome.storage.local.set({ freeTargets: targets });
+  };
+
+  const changeRoles = (nextRoles: ModeRoles) => {
+    if (isProcessing) return;
+    setRoles(nextRoles);
+    setContextNeedsReplay(Boolean(messages.length));
   };
 
   const openLogin = async (provider: AIProvider): Promise<void> => {
@@ -836,7 +845,7 @@ export default function App() {
         {mode !== 'free' && (
           <div className="mt-2">
             <button type="button" onClick={() => setShowRoleConfig((current) => !current)} className="text-xs font-medium text-sky-700 hover:text-sky-900">{showRoleConfig ? t('roles.toggle.hide') : t('roles.toggle.show')}</button>
-            {showRoleConfig && <RoleConfig providers={providers} mode={mode} roles={roles} onRolesChange={setRoles} disabled={!hydrated || isProcessing} />}
+            {showRoleConfig && <RoleConfig providers={providers} mode={mode} roles={roles} onRolesChange={changeRoles} disabled={!hydrated || isProcessing} />}
           </div>
         )}
 
@@ -924,6 +933,7 @@ function upsertStreamingMessage(
   pendingRolesRef: React.MutableRefObject<Record<string, string>>,
   setPendingRoles: React.Dispatch<React.SetStateAction<Record<string, string>>>,
 ): ChatMessage[] {
+  if (requestId && messages.some(message => message.requestId === requestId && !message.id.endsWith('-streaming'))) return messages;
   const existing = messages.find((message) => message.requestId === requestId && message.id.endsWith('-streaming'));
   if (existing) return messages.map((message) => message.id === existing.id ? { ...message, content } : message);
   const modeRole = consumePendingRole(provider, requestId, pendingRolesRef, setPendingRoles);
@@ -938,6 +948,7 @@ function finalizeMessage(
   pendingRolesRef: React.MutableRefObject<Record<string, string>>,
   setPendingRoles: React.Dispatch<React.SetStateAction<Record<string, string>>>,
 ): ChatMessage[] {
+  if (requestId && messages.some(message => message.requestId === requestId && !message.id.endsWith('-streaming'))) return messages;
   const existing = messages.find((message) => message.requestId === requestId && message.id.endsWith('-streaming'));
   if (existing) return messages.map((message) => message.id === existing.id ? { ...message, id: message.id.replace(/-streaming$/, ''), content } : message);
   const modeRole = consumePendingRole(provider, requestId, pendingRolesRef, setPendingRoles);
