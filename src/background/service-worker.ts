@@ -65,6 +65,7 @@ interface ResponseWaiter {
   provider: AIProvider;
   workflowId: string;
   tabId?: number;
+  documentId?: string;
   resolve: (value: string) => void;
   reject: (reason: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -203,8 +204,10 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     return;
   }
 
-  if (changeInfo.status === 'loading' && isOwner) {
-    rejectWaitersForProvider(provider, new Error(encodeError('error.reloaded', { provider })));
+  if (isOwner && (changeInfo.status === 'loading' || changeInfo.status === 'complete')) {
+    const navigationError = new Error(encodeError('error.reloaded', { provider }));
+    if (changeInfo.status === 'loading') rejectUnboundWaitersForProvider(provider, tabId, navigationError);
+    void verifyBoundWaiterDocuments(provider, tabId, navigationError);
   }
 
   const becameAvailable = changeInfo.discarded === false || changeInfo.frozen === false;
@@ -229,6 +232,22 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       rejectWaitersForProvider(provider, new Error(encodeError('error.tab_closed', { provider })));
       releasedOwner = updateConnection(provider, connectionAfterTabRelease(connections[provider], provider, tabId)) || releasedOwner;
     }
+  }
+  if (releasedOwner) {
+    broadcastConnections();
+    void refreshConnections();
+  }
+});
+
+chrome.tabs.onReplaced?.addListener((_addedTabId, removedTabId) => {
+  let releasedOwner = false;
+  for (const provider of PROVIDERS) {
+    if (connections[provider].tabId !== removedTabId) continue;
+    rejectWaitersForProvider(provider, new Error(encodeError('error.reloaded', { provider })));
+    releasedOwner = updateConnection(
+      provider,
+      connectionAfterTabRelease(connections[provider], provider, removedTabId),
+    ) || releasedOwner;
   }
   if (releasedOwner) {
     broadcastConnections();
@@ -457,10 +476,49 @@ function clearStatusProbeRetry(provider: AIProvider, tabId?: number): void {
   statusProbeRetries.delete(provider);
 }
 
-async function deliverToTab(provider: AIProvider, tabId: number, message: ExtensionMessage): Promise<unknown> {
+interface DeliveryOptions {
+  documentId?: string;
+  isActive?: () => boolean;
+}
+
+function assertDeliveryActive(isActive: (() => boolean) | undefined): void {
+  if (isActive?.()) return;
+  if (isActive) throw new DOMException('Provider request is no longer active', 'AbortError');
+}
+
+async function currentTopFrameDocumentId(tabId: number): Promise<string | undefined> {
   try {
-    return await chrome.tabs.sendMessage(tabId, message);
+    const results = await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      // This has no page-side effect; it only obtains Chrome's document identity
+      // immediately before a provider prompt is delivered.
+      func: () => undefined,
+      injectImmediately: true,
+    });
+    const [result] = results;
+    return results.length === 1 && result?.frameId === 0 && result.documentId
+      ? result.documentId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function deliverToTab(
+  provider: AIProvider,
+  tabId: number,
+  message: ExtensionMessage,
+  options: DeliveryOptions = {},
+): Promise<unknown> {
+  const send = async (): Promise<unknown> => {
+    assertDeliveryActive(options.isActive);
+    return options.documentId
+      ? chrome.tabs.sendMessage(tabId, message, { documentId: options.documentId })
+      : chrome.tabs.sendMessage(tabId, message);
+  };
+  try {
+    return await send();
   } catch (firstError) {
+    if (firstError instanceof DOMException && firstError.name === 'AbortError') throw firstError;
     if (message.action === 'SEND_MESSAGE'
       && !/Could not establish connection\. Receiving end does not exist\.?$/i.test(errorMessage(firstError))) {
       // A closed reply port can follow a real submission. Only a definite absent
@@ -468,12 +526,17 @@ async function deliverToTab(provider: AIProvider, tabId: number, message: Extens
       throw new Error(encodeError('error.send_unconfirmed', { provider }));
     }
     try {
-      await chrome.scripting.executeScript({ target: { tabId }, files: [CONTENT_SCRIPT_FILES[provider]] });
+      const target = options.documentId
+        ? { tabId, documentIds: [options.documentId] }
+        : { tabId };
+      await chrome.scripting.executeScript({ target, files: [CONTENT_SCRIPT_FILES[provider]] });
       await delay(150);
+      assertDeliveryActive(options.isActive);
       if (message.action === 'SEND_MESSAGE' && message.workflowId) {
         checkAborted(message.workflowId);
         const waiter = message.requestId ? responseWaiters.get(message.requestId) : undefined;
-        if (!waiter || waiter.workflowId !== message.workflowId || waiter.provider !== provider || waiter.tabId !== tabId) {
+        if (!options.isActive && (!waiter || waiter.workflowId !== message.workflowId
+          || waiter.provider !== provider || waiter.tabId !== tabId)) {
           throw new DOMException('Provider request is no longer active', 'AbortError');
         }
       }
@@ -486,7 +549,7 @@ async function deliverToTab(provider: AIProvider, tabId: number, message: Extens
       throw firstError;
     }
     try {
-      return await chrome.tabs.sendMessage(tabId, message);
+      return await send();
     } catch (retryError) {
       if (message.action === 'SEND_MESSAGE'
         && !/Could not establish connection\. Receiving end does not exist\.?$/i.test(errorMessage(retryError))) {
@@ -604,25 +667,45 @@ async function sendToProvider(provider: AIProvider, text: string, requestId: str
   if (connection.status !== 'connected' || !connection.tabId) {
     throw new Error(encodeError('error.not_ready', { provider }));
   }
-  workflowProviders.add(provider);
   const waiter = responseWaiters.get(requestId);
-  if (waiter) waiter.tabId = connection.tabId;
-  const result = await deliverToTab(provider, connection.tabId, {
+  if (!waiter) return;
+  const tabId = connection.tabId;
+  waiter.tabId = tabId;
+  const documentId = await currentTopFrameDocumentId(tabId);
+  if (responseWaiters.get(requestId) !== waiter
+    || waiter.provider !== provider
+    || waiter.workflowId !== workflowId
+    || waiter.tabId !== tabId
+    || connections[provider].tabId !== tabId) return;
+  if (!documentId) {
+    throw new Error(encodeError('error.send_unconfirmed', { provider }));
+  }
+  waiter.documentId = documentId;
+  const isCurrentRequest = () => (
+    responseWaiters.get(requestId) === waiter
+    && waiter.provider === provider
+    && waiter.workflowId === workflowId
+    && waiter.tabId === tabId
+    && waiter.documentId === documentId
+    && connections[provider].tabId === tabId
+  );
+  if (!isCurrentRequest()) return;
+  workflowProviders.add(provider);
+  const result = await deliverToTab(provider, tabId, {
     action: 'SEND_MESSAGE',
     provider,
     requestId,
     workflowId,
     payload: { text },
-  });
+  }, { documentId, isActive: isCurrentRequest });
+  if (!isCurrentRequest()) return;
   assertContentScriptAccepted(result);
   if (!result || typeof result !== 'object' || (result as { ok?: unknown }).ok !== true) {
     throw new Error(encodeError('error.send_unconfirmed', { provider }));
   }
-  const acceptedWaiter = responseWaiters.get(requestId);
-  if (acceptedWaiter) {
-    acceptedWaiter.deliveryAccepted = true;
-    acceptedWaiter.releaseDelivery();
-  }
+  if (!isCurrentRequest()) return;
+  waiter.deliveryAccepted = true;
+  waiter.releaseDelivery();
 }
 
 async function ensureActiveProvider(provider: AIProvider): Promise<void> {
@@ -695,7 +778,8 @@ function relayProviderResponse(message: ExtensionMessage, sender: chrome.runtime
     || message.provider !== waiter.provider
     || message.workflowId !== waiter.workflowId
     || waiter.tabId === undefined || sender.tab?.id !== waiter.tabId
-    || !sender.tab.url || getProviderFromUrl(sender.tab.url) !== waiter.provider) return;
+    || !sender.tab.url || getProviderFromUrl(sender.tab.url) !== waiter.provider
+    || (waiter.documentId !== undefined && (sender.documentId !== waiter.documentId || sender.frameId !== 0))) return;
   const done = message.action === 'RESPONSE_DONE';
   if (done) waiter.settling = true;
   const response = done && !message.payload.trim()
@@ -734,6 +818,34 @@ function rejectResponseWaiter(requestId: string, error: Error): void {
 function rejectWaitersForProvider(provider: AIProvider, error: Error): void {
   for (const [requestId, waiter] of responseWaiters) {
     if (waiter.provider === provider) rejectResponseWaiter(requestId, error);
+  }
+}
+
+function rejectUnboundWaitersForProvider(provider: AIProvider, tabId: number, error: Error): void {
+  for (const [requestId, waiter] of responseWaiters) {
+    if (waiter.provider === provider && waiter.tabId === tabId && waiter.documentId === undefined) {
+      rejectResponseWaiter(requestId, error);
+    }
+  }
+}
+
+async function verifyBoundWaiterDocuments(provider: AIProvider, tabId: number, error: Error): Promise<void> {
+  const snapshots = Array.from(responseWaiters, ([requestId, waiter]) => ({
+    requestId,
+    waiter,
+    documentId: waiter.documentId,
+  })).filter((snapshot): snapshot is { requestId: string; waiter: ResponseWaiter; documentId: string } => (
+    snapshot.waiter.provider === provider
+    && snapshot.waiter.tabId === tabId
+    && typeof snapshot.documentId === 'string'
+  ));
+  if (snapshots.length === 0) return;
+  const currentDocumentId = await currentTopFrameDocumentId(tabId);
+  for (const { requestId, waiter, documentId } of snapshots) {
+    if (responseWaiters.get(requestId) !== waiter
+      || waiter.tabId !== tabId
+      || waiter.documentId !== documentId) continue;
+    if (currentDocumentId !== documentId) rejectResponseWaiter(requestId, error);
   }
 }
 

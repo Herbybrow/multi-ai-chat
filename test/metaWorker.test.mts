@@ -72,7 +72,12 @@ function worker(
   const sessionGetHold: { current?: () => Promise<void> } = {};
   const navigationHold: { current?: (tabId: number, options?: { url?: string }) => Promise<void> } = {};
   const sendAcknowledgement: { current?: (message: any) => Promise<unknown> | unknown } = {};
-  const tabs = ALL_PROVIDERS.flatMap((provider, index) => missingTabs.includes(provider) ? [] : [{ id: index + 1, url: AI_PROVIDERS[provider].url }]);
+  const documentProbeHold: { current?: (tabId: number) => Promise<void> } = {};
+  const scriptExecutions: any[] = [];
+  const tabs: Array<{ id: number; url: string; status?: string }> = ALL_PROVIDERS.flatMap((provider, index) => (
+    missingTabs.includes(provider) ? [] : [{ id: index + 1, url: AI_PROVIDERS[provider].url }]
+  ));
+  const documentIds = new Map(tabs.map((tab) => [tab.id, `document-${tab.id}-initial`]));
   interface DynamicScript {
     id: string;
     matches?: readonly string[];
@@ -113,7 +118,7 @@ function worker(
       },
     },
     tabs: {
-      onUpdated: event(), onRemoved: event(),
+      onUpdated: event(), onRemoved: event(), onReplaced: event(),
       query: async () => tabs,
       get: async (id: number) => tabs.find((tab) => tab.id === id),
       create: async (options: { url: string }) => { created.push(options); },
@@ -123,13 +128,16 @@ function worker(
         if (navigationHold.current) await navigationHold.current(id, options);
         return tabs.find((tab) => tab.id === id);
       },
-      sendMessage: async (id: number, message: any) => {
+      sendMessage: async (id: number, message: any, options?: { documentId?: string }) => {
+        if (options?.documentId && options.documentId !== documentIds.get(id)) {
+          throw new Error('No matching document for this message');
+        }
         if (message.action === 'CHECK_STATUS') {
           const provider = message.provider as AIProvider;
           receive({ action: 'STATUS_REPORT', provider, payload: { loggedIn: provider in readiness ? readiness[provider] : true } }, { tab: tabs.find((tab) => tab.id === id) });
         }
         if (message.action === 'SEND_MESSAGE') {
-          sent.push({ ...message, tabId: id });
+          sent.push({ ...message, tabId: id, documentId: options?.documentId });
           if (rejectSend.includes(message.provider)) return { ok: false, error: 'already responding' };
           if (autoRespond) complete(sent.at(-1));
           if (sendAcknowledgement.current) return await sendAcknowledgement.current(sent.at(-1));
@@ -145,7 +153,18 @@ function worker(
       onRemoved: event(),
     },
     scripting: {
-      executeScript: async () => {},
+      executeScript: async (injection: any) => {
+        scriptExecutions.push(injection);
+        const tabId = injection.target?.tabId as number | undefined;
+        if (!tabId) return [];
+        if (injection.target?.documentIds?.some((documentId: string) => documentId !== documentIds.get(tabId))) {
+          throw new Error('No matching document for this injection');
+        }
+        if (!injection.func) return [];
+        if (documentProbeHold.current) await documentProbeHold.current(tabId);
+        const documentId = documentIds.get(tabId);
+        return documentId ? [{ frameId: 0, documentId }] : [];
+      },
       getRegisteredContentScripts: async () => dynamicScripts.map((script) => ({ ...script })),
       registerContentScripts: async (scripts: DynamicScript[]) => {
         for (const script of scripts) {
@@ -175,14 +194,20 @@ function worker(
       },
     },
   };
+  function senderForTab(tabId: number, documentId = documentIds.get(tabId)) {
+    return { tab: tabs.find((tab) => tab.id === tabId), documentId, frameId: 0 };
+  }
   function receive(message: any, sender: any = {}, reply: Function = () => {}) {
-    return chrome.runtime.onMessage.listeners[0](message, sender, reply);
+    const normalizedSender = sender.tab?.id !== undefined && sender.documentId === undefined
+      ? { ...sender, documentId: documentIds.get(sender.tab.id), frameId: sender.frameId ?? 0 }
+      : sender;
+    return chrome.runtime.onMessage.listeners[0](message, normalizedSender, reply);
   }
   function command(message: any, sender: any = {}): Promise<any> {
     return new Promise((resolve) => receive(message, sender, resolve));
   }
-  function complete(message: any, payload = 'answer') {
-    receive({ ...message, action: 'RESPONSE_DONE', payload }, { tab: tabs.find((tab) => tab.id === message.tabId) });
+  function complete(message: any, payload = 'answer', documentId = documentIds.get(message.tabId)) {
+    receive({ ...message, action: 'RESPONSE_DONE', payload }, senderForTab(message.tabId, documentId));
   }
   function fail(message: any, payload = '[Error: quota]') {
     complete(message, payload);
@@ -190,7 +215,24 @@ function worker(
   function removeTab(tabId: number) {
     const index = tabs.findIndex((tab) => tab.id === tabId);
     if (index >= 0) tabs.splice(index, 1);
+    documentIds.delete(tabId);
     for (const listener of chrome.tabs.onRemoved.listeners) listener(tabId);
+  }
+  function updateTab(tabId: number, changeInfo: Record<string, unknown>) {
+    const tab = tabs.find((candidate) => candidate.id === tabId);
+    if (!tab) throw new Error(`missing tab ${tabId}`);
+    if (typeof changeInfo.url === 'string') tab.url = changeInfo.url;
+    if (typeof changeInfo.status === 'string') tab.status = changeInfo.status;
+    for (const listener of chrome.tabs.onUpdated.listeners) listener(tabId, changeInfo, { ...tab });
+  }
+  function replaceTab(removedTabId: number, addedTabId: number) {
+    const index = tabs.findIndex((tab) => tab.id === removedTabId);
+    if (index < 0) throw new Error(`missing tab ${removedTabId}`);
+    const previous = tabs[index];
+    tabs[index] = { ...previous, id: addedTabId };
+    documentIds.delete(removedTabId);
+    documentIds.set(addedTabId, `document-${addedTabId}-replacement`);
+    for (const listener of chrome.tabs.onReplaced.listeners) listener(addedTabId, removedTabId);
   }
   const context = vm.createContext({
     chrome, console, URL, DOMException, crypto, TextEncoder,
@@ -226,11 +268,18 @@ function worker(
   const ready = new Promise<void>((resolve) => setImmediate(resolve));
   return {
     command, receive, sent, stops, broadcasts, local, session, navigated, navigations, created, ready, complete, fail, removeTab,
+    updateTab, replaceTab, scriptExecutions,
     dynamicScripts, contentScriptErrors, permissions: chrome.permissions, runtime: chrome.runtime,
     holdBroadcasts(handler?: (message: any) => Promise<void> | void) { broadcastHold.current = handler; },
     holdSessionGets(handler?: () => Promise<void>) { sessionGetHold.current = handler; },
     holdNavigations(handler?: (tabId: number, options?: { url?: string }) => Promise<void>) { navigationHold.current = handler; },
+    holdDocumentProbes(handler?: (tabId: number) => Promise<void>) { documentProbeHold.current = handler; },
     holdSendAcknowledgements(handler?: (message: any) => Promise<unknown> | unknown) { sendAcknowledgement.current = handler; },
+    documentId(tabId: number) { return documentIds.get(tabId); },
+    setDocumentId(tabId: number, documentId?: string) {
+      if (documentId) documentIds.set(tabId, documentId);
+      else documentIds.delete(tabId);
+    },
     pendingResponseCount: workerState.pendingResponseCount,
     pendingTimerCount: () => timers.size,
     grantMetaHostAccess: (granted: boolean) => { metaHostPermitted = granted; },
@@ -528,6 +577,139 @@ test('cancellation during absent-receiver repair prevents a delayed repeat send'
   assert.equal(app.sent.length, 1);
   assert.equal(app.pendingResponseCount(), 0);
   assert.equal(app.pendingTimerCount(), 0);
+});
+
+test('a provider request fails closed when Chrome cannot identify its document', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  // Gemini is the third default provider tab in this deterministic harness.
+  // An empty executeScript result models a browser that cannot prove which
+  // document would receive the prompt.
+  app.setDocumentId(3);
+  await app.send('free', ['gemini']);
+  assert.equal(app.sent.length, 0);
+  assert.equal(app.pendingResponseCount(), 0);
+  assert.equal(app.broadcasts.some((message) => (
+    decodeError(String(message.payload))?.key === 'error.send_unconfirmed'
+  )), true);
+});
+
+test('a bound provider request ignores a stale document response from the same tab', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  const running = app.send('free', ['gemini']);
+  await waitUntil(() => app.sent.length === 1, 'bound Gemini request');
+  const first = app.sent[0];
+  const documentId = app.documentId(first.tabId);
+  assert.equal(first.documentId, documentId);
+  app.receive({ ...first, action: 'RESPONSE_DONE', payload: 'stale document answer' }, {
+    tab: { id: first.tabId, url: AI_PROVIDERS.gemini.url }, documentId: 'document-stale', frameId: 0,
+  });
+  await flushWorkerTurns();
+  assert.equal(app.broadcasts.some((message) => message.payload === 'stale document answer'), false);
+  assert.equal(app.pendingResponseCount(), 1);
+  app.complete(first, 'bound document answer', documentId);
+  await running;
+  assert.equal(app.broadcasts.some((message) => message.payload === 'bound document answer'), true);
+});
+
+test('a bound Gemini request survives same-document loading and completion', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  const running = app.send('free', ['gemini']);
+  await waitUntil(() => app.sent.length === 1, 'bound Gemini request');
+  const first = app.sent[0];
+  const documentId = app.documentId(first.tabId);
+  assert.equal(first.documentId, documentId);
+  const conversationUrl = 'https://gemini.google.com/app/live-conversation';
+  app.updateTab(first.tabId, { status: 'loading', url: conversationUrl });
+  app.updateTab(first.tabId, { status: 'complete' });
+  await flushWorkerTurns();
+  assert.equal(app.pendingResponseCount(), 1);
+  app.complete(first, 'same document answer', documentId);
+  await running;
+  assert.equal(app.broadcasts.some((message) => message.payload === 'same document answer'), true);
+  assert.equal(app.broadcasts.some((message) => decodeError(String(message.payload))?.key === 'error.reloaded'), false);
+});
+
+test('a bound Gemini request rejects a changed document and never accepts its response', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  const running = app.send('free', ['gemini']);
+  await waitUntil(() => app.sent.length === 1, 'bound Gemini request');
+  const first = app.sent[0];
+  assert.equal(typeof first.documentId, 'string');
+  const conversationUrl = 'https://gemini.google.com/app/new-document';
+  app.setDocumentId(first.tabId, 'document-gemini-replacement');
+  app.updateTab(first.tabId, { status: 'loading', url: conversationUrl });
+  app.updateTab(first.tabId, { status: 'complete' });
+  await waitUntil(() => app.broadcasts.some((message) => decodeError(String(message.payload))?.key === 'error.reloaded'), 'document-change failure');
+  app.complete(first, 'replacement document answer', 'document-gemini-replacement');
+  await flushWorkerTurns();
+  assert.equal(app.broadcasts.some((message) => message.payload === 'replacement document answer'), false);
+  await running;
+  assert.equal(app.pendingResponseCount(), 0);
+});
+
+test('a stale document probe cannot reject a request that already completed', async (t) => {
+  const app = worker({}, false);
+  let release: (() => void) | undefined;
+  t.after(() => { release?.(); app.close(); });
+  await app.ready;
+  const running = app.send('free', ['gemini']);
+  await waitUntil(() => app.sent.length === 1, 'bound Gemini request');
+  const first = app.sent[0];
+  const documentId = app.documentId(first.tabId);
+  assert.equal(first.documentId, documentId);
+  const probesBefore = app.scriptExecutions.filter((injection) => Boolean(injection.func)).length;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  app.holdDocumentProbes(async () => held);
+  app.updateTab(first.tabId, { status: 'loading', url: 'https://gemini.google.com/app/pending-probe' });
+  await waitUntil(() => app.scriptExecutions.filter((injection) => Boolean(injection.func)).length > probesBefore, 'held document probe');
+  app.complete(first, 'answer before probe returns', documentId);
+  await running;
+  app.setDocumentId(first.tabId, 'document-gemini-after-completion');
+  release?.();
+  app.holdDocumentProbes();
+  await flushWorkerTurns();
+  assert.equal(app.broadcasts.some((message) => decodeError(String(message.payload))?.key === 'error.reloaded'), false);
+});
+
+test('a document-bound send repair cannot redirect a prompt to a replacement document', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  let boundDocumentId: string | undefined;
+  app.holdSendAcknowledgements((message) => {
+    boundDocumentId = message.documentId;
+    app.setDocumentId(message.tabId, 'document-gemini-after-send-race');
+    throw new Error('Could not establish connection. Receiving end does not exist.');
+  });
+  await app.send('free', ['gemini']);
+  assert.equal(typeof boundDocumentId, 'string');
+  assert.equal(app.sent.length, 1);
+  const repair = app.scriptExecutions.find((injection) => Array.isArray(injection.files));
+  assert.equal(repair?.target?.documentIds?.length, 1);
+  assert.equal(repair?.target?.documentIds?.[0], boundDocumentId);
+});
+
+test('a replaced provider tab rejects its old bound request without sending a prompt to the replacement', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  const running = app.send('free', ['gemini']);
+  await waitUntil(() => app.sent.length === 1, 'bound Gemini request');
+  const first = app.sent[0];
+  assert.equal(typeof first.documentId, 'string');
+  app.replaceTab(first.tabId, 99);
+  await waitUntil(() => app.broadcasts.some((message) => decodeError(String(message.payload))?.key === 'error.reloaded'), 'tab replacement failure');
+  assert.equal(app.sent.length, 1);
+  await running;
+  assert.equal(app.pendingResponseCount(), 0);
 });
 
 test('25 alternating Roundtable and Debate workflows keep isolated contexts and clean request state', async (t) => {
