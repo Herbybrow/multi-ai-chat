@@ -35,6 +35,7 @@ export const CHATGPT_LOGGED_OUT_SELECTORS = [
 
 export const CHATGPT_ACCOUNT_SELECTORS = [
   'button[data-testid="accounts-profile-button"]',
+  'button[aria-label="Open profile menu"]',
 ];
 
 export const CHATGPT_STOP_SELECTORS = [

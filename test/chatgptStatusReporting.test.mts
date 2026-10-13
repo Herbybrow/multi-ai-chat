@@ -73,6 +73,8 @@ function content(t: TestContext) {
     if (selector === 'div[contenteditable="true"][data-placeholder]') return control.isContentEditable && control.hasAttribute('data-placeholder');
     const testId = selector.match(/^(?:button)?\[data-testid="([^"]+)"\]$/)?.[1];
     if (testId) return control.getAttribute('data-testid') === testId;
+    const ariaLabel = selector.match(/^button\[aria-label="([^"]+)"\]$/)?.[1];
+    if (ariaLabel) return control.tagName === 'BUTTON' && control.getAttribute('aria-label') === ariaLabel;
     return false;
   }
   const nodes: Control[] = [];
@@ -128,6 +130,11 @@ function content(t: TestContext) {
     control, nodes, tick, inject,
     mutate: () => mutate(),
     account: (visible = true) => nodes.push(control({ tagName: 'BUTTON', visible, attributes: { 'data-testid': 'accounts-profile-button' } })),
+    profileMenu: (visible = true) => nodes.push(control({
+      tagName: 'BUTTON',
+      visible,
+      attributes: { 'aria-label': 'Open profile menu', 'aria-haspopup': 'menu' },
+    })),
     prompt: (options: Partial<Control> = {}) => {
       const input = control({ id: 'prompt-textarea', ...options });
       nodes.push(input);
@@ -153,6 +160,22 @@ test('an authenticated ChatGPT account with a usable composer reports Ready', t 
   app.prompt();
   app.inject();
   assert.equal(app.status(), 'connected');
+});
+
+test('the current Open profile menu control with a usable composer reports Ready', t => {
+  const app = content(t);
+  app.profileMenu();
+  app.prompt();
+  app.inject();
+  assert.equal(app.status(), 'connected');
+});
+
+test('the current Open profile menu control without a usable composer remains Checking', t => {
+  const app = content(t);
+  app.profileMenu();
+  app.inject();
+  app.tick(30000);
+  assert.equal(app.status(), 'checking');
 });
 
 test('a guest composer alone is not authentication evidence', t => {
@@ -238,6 +261,15 @@ test('an account menu inside a collapsed sidebar still identifies an authenticat
 test('visible login evidence overrides a stale mounted account control', t => {
   const app = content(t);
   app.account();
+  app.prompt();
+  app.login();
+  app.inject();
+  assert.equal(app.status(), 'login-required');
+});
+
+test('visible login evidence overrides a stale current profile-menu control', t => {
+  const app = content(t);
+  app.profileMenu();
   app.prompt();
   app.login();
   app.inject();
