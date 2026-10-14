@@ -496,6 +496,24 @@ test('a completion before a rejected send acknowledgement cannot become a Debate
   assert.doesNotMatch(app.sent[1].payload.text, /normal response before rejected acknowledgement/);
 });
 
+test('a content failure already reported by RESPONSE_DONE keeps provider-scoped recovery instead of a system error', async (t) => {
+  const app = worker({}, false);
+  t.after(app.close);
+  await app.ready;
+  app.holdSendAcknowledgements((message) => {
+    app.complete(message, '[Error: i18n:{"key":"error.input_injection_failed","params":{"provider":"chatgpt"}}]');
+    return { ok: false, error: 'editor text did not match the requested prompt', failureAlreadyReported: true };
+  });
+  const running = app.send('debate');
+  await waitUntil(() => app.broadcasts.some((message) => message.action === 'STEP_RECOVERY_REQUIRED'), 'reported content failure recovery');
+  const recovery = app.broadcasts.find((message) => message.action === 'STEP_RECOVERY_REQUIRED')!.payload;
+  assert.equal(recovery.provider, 'chatgpt');
+  assert.equal(decodeError(recovery.reason)?.key, 'error.input_injection_failed');
+  assert.equal(app.broadcasts.some((message) => message.provider === 'system' && /editor text did not match/.test(String(message.payload))), false);
+  await app.command({ action: 'RESOLVE_STEP_RECOVERY', payload: { ...recovery, action: 'cancel' } });
+  await running;
+});
+
 for (const acknowledgement of [undefined, {}, { ok: 'yes' }]) {
   test(`an unconfirmed send acknowledgement ${JSON.stringify(acknowledgement)} cannot relay a successful answer`, async (t) => {
     const app = worker({}, false);

@@ -749,6 +749,15 @@ async function sendToProvider(provider: AIProvider, text: string, requestId: str
     payload: { text },
   }, { documentId, isActive: isCurrentRequest });
   if (!isCurrentRequest()) return;
+  // The content script can reject its command after it has already published a
+  // scoped RESPONSE_DONE error. Release the relay and let that error settle
+  // the waiter; treating it as an undelivered transport failure loses provider
+  // attribution and races the legitimate recovery path.
+  if (isReportedContentFailure(result)) {
+    waiter.deliveryAccepted = true;
+    waiter.releaseDelivery();
+    return;
+  }
   assertContentScriptAccepted(result);
   if (!result || typeof result !== 'object' || (result as { ok?: unknown }).ok !== true) {
     throw new Error(encodeError('error.send_unconfirmed', { provider }));
@@ -756,6 +765,12 @@ async function sendToProvider(provider: AIProvider, text: string, requestId: str
   if (!isCurrentRequest()) return;
   waiter.deliveryAccepted = true;
   waiter.releaseDelivery();
+}
+
+function isReportedContentFailure(result: unknown): boolean {
+  return Boolean(result && typeof result === 'object'
+    && (result as { ok?: unknown }).ok === false
+    && (result as { failureAlreadyReported?: unknown }).failureAlreadyReported === true);
 }
 
 async function ensureActiveProvider(provider: AIProvider): Promise<void> {

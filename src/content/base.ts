@@ -974,7 +974,17 @@ export function createContentScript(config: ContentScriptConfig): void {
       const { text = '' } = (message.payload as { text?: string } | undefined) ?? {};
       void sendMessage(text, message.requestId, message.workflowId)
         .then(() => sendResponse({ ok: true }))
-        .catch((error) => sendResponse({ ok: false, error: errorMessage(error) }));
+        .catch((error) => {
+          // finishWithError has already emitted a scoped RESPONSE_DONE. Keep
+          // that completion authoritative: rejecting the command first makes
+          // the worker discard its own provider error and show an unscoped
+          // system message instead.
+          const settledFailure = failedRequestTombstone;
+          const failureAlreadyReported = Boolean(settledFailure
+            && settledFailure.requestId === message.requestId
+            && settledFailure.workflowId === message.workflowId);
+          sendResponse({ ok: false, error: errorMessage(error), ...(failureAlreadyReported ? { failureAlreadyReported: true } : {}) });
+        });
       return true;
     }
     if (message.action === 'CHECK_STATUS') {

@@ -49,13 +49,14 @@ function promptWorker(bundle: boolean, provider: AIProvider) {
       onUpdated: event(), onRemoved: event(), query: async () => tabs,
       get: async (id: number) => tabs.find(tab => tab.id === id),
       update: async (id: number) => tabs.find(tab => tab.id === id), create: async () => {},
-      sendMessage: async (id: number, message: any) => {
+      sendMessage: async (id: number, message: any, options?: { documentId?: string }) => {
         const tab = tabs.find(candidate => candidate.id === id);
+        const sender = { tab, documentId: options?.documentId, frameId: 0 };
         if (message.action === 'CHECK_STATUS') {
-          receive({ action: 'STATUS_REPORT', provider: message.provider, payload: { loggedIn: true } }, { tab });
+          receive({ action: 'STATUS_REPORT', provider: message.provider, payload: { loggedIn: true } }, sender);
         } else if (message.action === 'SEND_MESSAGE') {
           sent.push({ provider: message.provider, text: message.payload.text });
-          receive({ ...message, action: 'RESPONSE_DONE', payload: reference }, { tab });
+          receive({ ...message, action: 'RESPONSE_DONE', payload: reference }, sender);
         }
         return { ok: true };
       },
@@ -63,7 +64,12 @@ function promptWorker(bundle: boolean, provider: AIProvider) {
     windows: { update: async () => {} },
     permissions: { contains: async () => standby !== 'meta', onAdded: event(), onRemoved: event() },
     scripting: {
-      executeScript: async () => {}, getRegisteredContentScripts: async () => [],
+      // The worker binds SEND_MESSAGE to Chrome's top-frame document identity.
+      // Return that identity for its no-op probe so this fixture exercises prompt
+      // construction rather than waiting for recovery from a simulated navigation.
+      executeScript: async (details: { target?: { tabId?: number }; func?: unknown }) => (
+        details.func ? [{ frameId: 0, documentId: `fixture-document-${details.target?.tabId ?? 0}` }] : []
+      ), getRegisteredContentScripts: async () => [],
       registerContentScripts: async () => {}, unregisterContentScripts: async () => {},
     },
   };

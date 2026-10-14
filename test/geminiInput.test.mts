@@ -153,6 +153,20 @@ test('Gemini accepts a false native-command return when exact editor readback ar
   assert.deepEqual(app.events, []);
 });
 
+test('Gemini keeps waiting for an exact controlled-editor commit beyond one background timer quantum', async () => {
+  const app = inputHarness();
+  const editor = new app.Editor();
+  const text = 'Delayed background reconciliation\n\nKeep exact whitespace.';
+  app.setExecCommand((_command, _showUi, insertedText) => {
+    setTimeout(() => editor.commit(insertedText), 1200);
+    return true;
+  });
+  await app.config.injectInput(editor, text);
+  assert.equal(app.config.readInputText(editor), text);
+  assert.equal(app.commands.length, 1);
+  assert.deepEqual(app.events, []);
+});
+
 test('Gemini cancellation during native insertion settlement stops verification without replay', async () => {
   const app = inputHarness();
   const editor = new app.Editor();

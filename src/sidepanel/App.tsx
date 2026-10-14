@@ -146,6 +146,7 @@ export default function App() {
   const [stepRecovery, setStepRecovery] = useState<StepRecoveryRequest | null>(null);
   const [isResolvingRecovery, setIsResolvingRecovery] = useState(false);
   const [trace, setTrace] = useState<TraceEntry[]>([]);
+  const [traceOpen, setTraceOpen] = useState(false);
   const [showRoleConfig, setShowRoleConfig] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
@@ -432,7 +433,7 @@ export default function App() {
           setIsProcessing(true);
           setWorkflowStatus(status);
           const text = formatWorkflowStatus(status);
-          setTrace((current) => current[current.length - 1]?.text === text ? current : [...current, { id: crypto.randomUUID(), text, timestamp: Date.now() }].slice(-100));
+          setTrace((current) => current[current.length - 1]?.text === text ? current : [...current, { id: crypto.randomUUID(), text, timestamp: Date.now() }]);
           break;
         }
         case 'WORKFLOW_DIAGNOSTIC': {
@@ -450,7 +451,7 @@ export default function App() {
             : ` · candidates ${diagnostic.responseCandidateCount}${diagnostic.semanticResponseCandidateCount === undefined ? '' : `/${diagnostic.semanticResponseCandidateCount}`}`;
           const observed = diagnostic.generationObserved === undefined ? '' : ` · generation ${diagnostic.generationObserved ? 'seen' : 'not seen'}`;
           const text = `${providerName}${role} · ${diagnostic.stage}${attempt}${length}${failure}${code}${candidates}${observed}`;
-          setTrace((current) => [...current, { id: crypto.randomUUID(), text, timestamp: Date.now() }].slice(-100));
+          setTrace((current) => [...current, { id: crypto.randomUUID(), text, timestamp: Date.now() }]);
           break;
         }
       }
@@ -468,6 +469,13 @@ export default function App() {
       if (response) setConnections(response as Record<AIProvider, AIConnection>);
     });
   }, [activeConversationId, hydrated]);
+
+  // Persist the expanded trace after a run finishes. A controlled `open`
+  // attribute tied only to isProcessing made completed failure details close on
+  // every subsequent render.
+  useEffect(() => {
+    if (isProcessing) setTraceOpen(true);
+  }, [isProcessing]);
 
   useEffect(() => {
     if (!hydrated || !activeConversationId) return;
@@ -861,7 +869,7 @@ export default function App() {
         </div>
       </header>
 
-      <section className="min-h-0 max-h-[46vh] shrink overflow-y-auto border-b border-slate-200 bg-white px-3 py-3">
+      <section className="min-h-0 max-h-[46vh] flex-none overflow-y-auto overscroll-contain border-b border-slate-200 bg-white px-3 py-3">
         <ModeSelector mode={mode} onModeChange={changeMode} disabled={isProcessing} />
 
         {mode === 'free' && (
@@ -906,13 +914,13 @@ export default function App() {
           </div>
         </details>
 
-        <details className="mt-2 rounded-lg border border-slate-200 bg-white" open={isProcessing}>
+        <details className="mt-2 rounded-lg border border-slate-200 bg-white" open={isProcessing || traceOpen} onToggle={(event) => setTraceOpen(event.currentTarget.open)}>
           <summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-slate-700"><span className={`mr-2 inline-block h-2 w-2 rounded-full ${isProcessing ? 'animate-pulse bg-sky-500' : 'bg-emerald-500'}`} />{t('trace.title')} · <span className="font-normal text-slate-500">{currentStatus}</span></summary>
           {workflowStatus?.progress && <div className="border-t border-slate-100 px-2.5 py-1.5 text-[11px] text-slate-600">
             {t('workflow.progress', { completed: workflowStatus.progress.completed, total: workflowStatus.progress.total, attempts: workflowStatus.progress.recoveryAttempts })}
             {workflowStatus.progress.lastCheckpointAt && <span className="ml-2 text-slate-400">{t('workflow.checkpoint', { time: new Date(workflowStatus.progress.lastCheckpointAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) })}</span>}
           </div>}
-          {trace.length > 0 && <div className="max-h-56 space-y-1 overflow-y-auto border-t border-slate-200 p-2.5">{trace.map((entry) => <div key={entry.id} className="break-words text-[11px] leading-relaxed text-slate-600">{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {entry.text}</div>)}</div>}
+          {trace.length > 0 && <div className="space-y-1 border-t border-slate-200 p-2.5">{trace.map((entry) => <div key={entry.id} className="break-words text-[11px] leading-relaxed text-slate-600">{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {entry.text}</div>)}</div>}
           {stepRecovery && (
             <div role="alert" className="border-t border-amber-200 bg-amber-50 p-2.5">
               <div className="text-xs font-semibold text-amber-900">{t('recovery.title', { provider: AI_PROVIDERS[stepRecovery.provider].name })}</div>

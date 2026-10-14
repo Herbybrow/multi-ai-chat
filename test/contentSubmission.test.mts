@@ -284,10 +284,12 @@ test('a configured composer reader rejects changed provider text before any Send
     single: true,
     readInputText: (editor) => editor.value ? 'provider changed the prompt' : '',
   });
-  assert.equal((await app.send()).ok, false);
+  const acknowledgement = await app.send();
+  assert.equal(acknowledgement.ok, false);
   await app.advance(15000);
   assert.deepEqual(app.counts(), { clicks: 0, enters: 0, injections: 1 });
   assert.match(app.done()[0]?.payload, /error.input_injection_failed/);
+  assert.equal(acknowledgement.failureAlreadyReported, true);
 });
 
 test('single activation refuses an already-generating provider before touching its composer', async t => {

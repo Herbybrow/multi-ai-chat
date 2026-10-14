@@ -2,7 +2,10 @@ import { focusWithoutScroll } from './focusWithoutScroll';
 import { isUsableGeminiComposerInput, isVisibleGeminiElement } from './geminiDom';
 
 const BLOCK_TAGS = new Set(['P', 'DIV', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6']);
-const INSERT_SETTLEMENT_TIMEOUT_MS = 1000;
+// A controlled Gemini editor may reconcile after more than one background-tab
+// timer quantum. Keep the one native edit and exact readback contract, but do
+// not turn a delayed commit into the same failure as a changed prompt.
+const INSERT_SETTLEMENT_TIMEOUT_MS = 8000;
 const INSERT_SETTLEMENT_POLL_MS = 25;
 
 export async function injectGeminiInput(
