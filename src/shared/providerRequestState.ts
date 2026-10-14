@@ -17,12 +17,24 @@ export type ProviderRequestState =
   | 'uncertain_submission'
   | 'terminal_failure';
 
+// Safe provider-page observations attached only to lifecycle events.  These
+// fields deliberately describe DOM state rather than any prompt, response, or
+// account data, so a live failure can be diagnosed without retaining content.
+export interface ProviderRequestDiagnostics {
+  responseCandidateCount?: number;
+  semanticResponseCandidateCount?: number;
+  currentResponseLength?: number;
+  generationObserved?: boolean;
+  failureCode?: string;
+}
+
 export interface ProviderRequestStatePayload {
   provider: AIProvider;
   requestId: string;
   workflowId: string;
   state: ProviderRequestState;
   submission: SubmissionEvidence;
+  diagnostics?: ProviderRequestDiagnostics;
 }
 
 const RANK: Record<ProviderRequestState, number> = {

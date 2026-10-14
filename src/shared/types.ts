@@ -101,7 +101,14 @@ export interface WorkflowDiagnosticPayload {
   attempt?: number;
   submission?: SubmissionEvidence;
   failureKind?: ProviderFailureKind;
+  // Encoded error keys and aggregate page observations are safe to display in
+  // the developer trace. They must never include prompt or response text.
+  failureCode?: string;
   responseLength?: number;
+  responseCandidateCount?: number;
+  semanticResponseCandidateCount?: number;
+  currentResponseLength?: number;
+  generationObserved?: boolean;
   sessionId?: string;
   clientId?: string;
 }

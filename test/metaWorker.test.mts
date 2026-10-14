@@ -1207,6 +1207,14 @@ test('an empty Debate completion opens recovery rather than becoming an argument
   app.complete(app.sent[0], '  ');
   await waitUntil(() => app.broadcasts.some((message) => message.action === 'STEP_RECOVERY_REQUIRED'), 'empty completion recovery');
   assert.equal(app.sent.length, 1);
+  const diagnostics = app.broadcasts.filter((message) => message.action === 'WORKFLOW_DIAGNOSTIC');
+  assert.equal(diagnostics.some((message) => message.payload?.stage === 'response_extracted'), false);
+  assert.ok(diagnostics.some((message) => (
+    message.payload?.stage === 'response_error'
+      && message.payload?.failureCode === 'error.no_response_text'
+      && message.payload?.failureKind === 'response_extraction'
+      && message.payload?.responseLength === undefined
+  )), 'an encoded no-response envelope is recorded as an error, never an extracted response');
   const recovery = app.broadcasts.find((message) => message.action === 'STEP_RECOVERY_REQUIRED')!.payload;
   assert.equal(decodeError(recovery.reason)?.key, 'error.no_response_text');
   assert.equal((await app.command({ action: 'RESOLVE_STEP_RECOVERY', payload: { ...recovery, action: 'cancel' } })).ok, true);

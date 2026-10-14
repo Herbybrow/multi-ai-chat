@@ -23,7 +23,7 @@ import {
 } from '../shared/constants';
 import { questionWithConversationContext } from '../shared/conversationContinuity';
 import { appendResponseLanguagePolicy } from '../shared/promptLanguage';
-import { encodeError } from '../shared/errors';
+import { decodeError, encodeError } from '../shared/errors';
 import {
   chooseAutonomousRecoveryAction,
   DEFAULT_AUTONOMOUS_RECOVERY,
@@ -49,6 +49,7 @@ import {
   shouldAcceptProviderState,
   isProviderRequestState,
   submissionEvidenceForState,
+  type ProviderRequestDiagnostics,
   type ProviderRequestState,
 } from '../shared/providerRequestState';
 import { getProviderReadiness } from '../shared/providerReadiness';
@@ -827,7 +828,7 @@ function waitForResponse(provider: AIProvider, requestId: string, workflowId: st
 function relayProviderRequestState(message: ExtensionMessage, sender: chrome.runtime.MessageSender): void {
   if (!message.requestId || !message.provider || !message.workflowId || !message.payload) return;
   const waiter = responseWaiters.get(message.requestId);
-  const payload = message.payload as { state?: unknown; submission?: unknown };
+  const payload = message.payload as { state?: unknown; submission?: unknown; diagnostics?: unknown };
   if (!waiter
     || waiter.provider !== message.provider
     || waiter.workflowId !== message.workflowId
@@ -848,7 +849,30 @@ function relayProviderRequestState(message: ExtensionMessage, sender: chrome.run
     requestId: message.requestId,
     stage: `provider_${state}`,
     submission: payload.submission,
+    ...sanitizeProviderRequestDiagnostics(payload.diagnostics),
   });
+}
+
+function sanitizeProviderRequestDiagnostics(value: unknown): Partial<ProviderRequestDiagnostics> {
+  if (!value || typeof value !== 'object') return {};
+  const source = value as Record<string, unknown>;
+  const count = (key: string): number | undefined => {
+    const candidate = source[key];
+    return typeof candidate === 'number' && Number.isSafeInteger(candidate) && candidate >= 0 && candidate <= 10_000
+      ? candidate
+      : undefined;
+  };
+  const failureCode = typeof source.failureCode === 'string'
+    && /^[a-z0-9_.-]{1,96}$/i.test(source.failureCode)
+    ? source.failureCode
+    : undefined;
+  return {
+    ...(count('responseCandidateCount') !== undefined ? { responseCandidateCount: count('responseCandidateCount') } : {}),
+    ...(count('semanticResponseCandidateCount') !== undefined ? { semanticResponseCandidateCount: count('semanticResponseCandidateCount') } : {}),
+    ...(count('currentResponseLength') !== undefined ? { currentResponseLength: count('currentResponseLength') } : {}),
+    ...(typeof source.generationObserved === 'boolean' ? { generationObserved: source.generationObserved } : {}),
+    ...(failureCode ? { failureCode } : {}),
+  };
 }
 
 function relayProviderResponse(message: ExtensionMessage, sender: chrome.runtime.MessageSender): void {
@@ -866,6 +890,7 @@ function relayProviderResponse(message: ExtensionMessage, sender: chrome.runtime
   const response = done && !message.payload.trim()
     ? `[Error: ${encodeError('error.no_response_text', { provider: waiter.provider })}]`
     : message.payload;
+  const responseError = done ? decodeError(response) : null;
   // Content messages also reach extension pages directly. The panel consumes only
   // this validated relay; keep chunks and completion ordered before advancing.
   waiter.relayTail = waiter.relayTail.then(async () => {
@@ -884,9 +909,17 @@ function relayProviderResponse(message: ExtensionMessage, sender: chrome.runtime
     await sendWorkflowDiagnostic({
       provider: waiter.provider,
       requestId,
-      stage: 'response_extracted',
+      // An encoded error is transport data for recovery, never extracted model
+      // output. Keeping it out of the extraction trace prevents an error's
+      // character count from being mistaken for an assistant response.
+      stage: responseError ? 'response_error' : 'response_extracted',
       submission: waiter.submission,
-      responseLength: response.length,
+      ...(responseError
+        ? {
+          failureKind: classifyProviderFailure(response),
+          failureCode: responseError.key,
+        }
+        : { responseLength: response.length }),
     });
     waiter.resolve(response);
   }).catch((error: unknown) => {
@@ -1710,6 +1743,7 @@ async function requestStepRecovery(
     await checkpointFailure(checkpoint.current.turnKey, requestError, attempt);
   }
   const failureKind = classifyProviderFailure(errorMessage(error));
+  const failureCode = decodeError(errorMessage(error))?.key ?? 'unstructured_provider_error';
   const submission = requestError?.submission ?? 'uncertain';
   await sendWorkflowDiagnostic({
     provider,
@@ -1717,6 +1751,7 @@ async function requestStepRecovery(
     stage: 'recovery_required',
     submission,
     failureKind,
+    failureCode,
   });
   const automatic = chooseAutonomousRecoveryAction({
     settings: checkpoint?.recovery ?? DEFAULT_AUTONOMOUS_RECOVERY,

@@ -1,7 +1,11 @@
 import type { AIProvider, ExtensionMessage } from '../shared/types';
-import { submissionEvidenceForState, type ProviderRequestState } from '../shared/providerRequestState';
+import {
+  submissionEvidenceForState,
+  type ProviderRequestDiagnostics,
+  type ProviderRequestState,
+} from '../shared/providerRequestState';
 import type { SubmissionEvidence } from '../shared/autonomousRecovery';
-import { encodeError } from '../shared/errors';
+import { decodeError, encodeError } from '../shared/errors';
 import {
   extractResponseContent,
   longerResponseText,
@@ -209,15 +213,19 @@ export function createContentScript(config: ContentScriptConfig): void {
     chrome.runtime.sendMessage(message).catch(() => {});
   }
 
-  function reportRequestState(state: ProviderRequestState, submission: SubmissionEvidence): void {
-    if (!activeRequestId || !activeWorkflowId || lastReportedRequestState === state) return;
+  function reportRequestState(
+    state: ProviderRequestState,
+    submission: SubmissionEvidence,
+    diagnostics?: ProviderRequestDiagnostics,
+  ): void {
+    if (!activeRequestId || !activeWorkflowId || (lastReportedRequestState === state && !diagnostics)) return;
     lastReportedRequestState = state;
     safeSendMessage({
       action: 'PROVIDER_REQUEST_STATE',
       provider,
       requestId: activeRequestId,
       workflowId: activeWorkflowId,
-      payload: { state, submission },
+      payload: { state, submission, ...(diagnostics ? { diagnostics } : {}) },
     });
   }
 
@@ -667,6 +675,22 @@ export function createContentScript(config: ContentScriptConfig): void {
     return [];
   }
 
+  function captureFailureDiagnostics(reason: string): ProviderRequestDiagnostics {
+    const currentText = getLatestResponseText();
+    // Counts and lengths are intentionally the only page observations emitted
+    // for a failed request. They help distinguish a selector miss from an empty
+    // or still-streaming candidate without serializing provider content.
+    return {
+      responseCandidateCount: queryResponses().length,
+      semanticResponseCandidateCount: responseTracking === 'semantic-latest'
+        ? querySemanticResponses().length
+        : undefined,
+      currentResponseLength: currentText?.length ?? 0,
+      generationObserved: sawGenerationActivity,
+      failureCode: decodeError(reason)?.key ?? 'unstructured_provider_error',
+    };
+  }
+
   function extractResponseText(response: Element): string | null {
     return extractResponseContent(response, responseContentRoot);
   }
@@ -792,7 +816,11 @@ export function createContentScript(config: ContentScriptConfig): void {
     const failureState: ProviderRequestState = reason.includes('error.existing_draft')
       ? 'existing_draft'
       : sendDispatched ? 'uncertain_submission' : 'recoverable_failure';
-    reportRequestState(failureState, sendDispatched ? 'uncertain' : 'not_submitted');
+    reportRequestState(
+      failureState,
+      sendDispatched ? 'uncertain' : 'not_submitted',
+      captureFailureDiagnostics(reason),
+    );
     resetResponseState();
     // Recovery arrives after RESPONSE_DONE has settled the background waiter. Keep only this
     // exact failed identity so its later scoped STOP can still click a provider stream that

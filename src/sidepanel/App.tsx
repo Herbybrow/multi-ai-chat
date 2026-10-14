@@ -444,7 +444,12 @@ export default function App() {
           const attempt = diagnostic.attempt ? ` · attempt ${diagnostic.attempt}` : '';
           const length = diagnostic.responseLength === undefined ? '' : ` · ${diagnostic.responseLength} chars`;
           const failure = diagnostic.failureKind ? ` · ${diagnostic.failureKind}` : '';
-          const text = `${providerName}${role} · ${diagnostic.stage}${attempt}${length}${failure}`;
+          const code = diagnostic.failureCode ? ` · ${diagnostic.failureCode}` : '';
+          const candidates = diagnostic.responseCandidateCount === undefined
+            ? ''
+            : ` · candidates ${diagnostic.responseCandidateCount}${diagnostic.semanticResponseCandidateCount === undefined ? '' : `/${diagnostic.semanticResponseCandidateCount}`}`;
+          const observed = diagnostic.generationObserved === undefined ? '' : ` · generation ${diagnostic.generationObserved ? 'seen' : 'not seen'}`;
+          const text = `${providerName}${role} · ${diagnostic.stage}${attempt}${length}${failure}${code}${candidates}${observed}`;
           setTrace((current) => [...current, { id: crypto.randomUUID(), text, timestamp: Date.now() }].slice(-100));
           break;
         }
