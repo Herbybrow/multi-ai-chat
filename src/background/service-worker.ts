@@ -68,13 +68,13 @@ import { assertContentScriptAccepted } from './messageDelivery';
 import { classifyProviderFailure } from './recoveryFailure';
 import {
   ProviderRequestError,
-  runRecoverableWorkflowStep,
   runRoundtableWorkflow,
   SKIP_RESPONSE,
   StepRecoveryCoordinator,
   StepRecoveryReplayCoordinator,
   transferStepRecoveryOwnership,
 } from './roundtableRecovery';
+import { runCheckpointedRecoverableTurn } from './recoverableWorkflowTurn';
 import { assertCurrentWorkflow, WorkflowStartGate } from './workflowStartGate';
 import { META_ORIGINS } from '../shared/metaOrigins';
 import { syncMetaHostAccess } from './metaHostAccess';
@@ -1130,7 +1130,8 @@ async function notifyInterruptedWorkflow(target?: { clientId?: string; sessionId
     const checkpointStored = await chrome.storage.local.get(WORKFLOW_CHECKPOINT_STORAGE_KEY);
     const checkpoint = normalizeWorkflowCheckpoint(checkpointStored[WORKFLOW_CHECKPOINT_STORAGE_KEY]);
     if (checkpoint && checkpoint.sessionId === target.sessionId
-      && (checkpoint.mode === 'roundtable' || checkpoint.mode === 'debate')) {
+      && (checkpoint.mode === 'roundtable' || checkpoint.mode === 'debate'
+        || checkpoint.mode === 'consult' || checkpoint.mode === 'coding')) {
       restoreInFlight = restoreCheckpointedWorkflow(checkpoint, restoreTarget)
         .finally(() => { restoreInFlight = undefined; });
       await restoreInFlight;
@@ -1418,34 +1419,9 @@ async function handleFreeMode(text: string, requestedTargets: AIProvider[] | und
 async function handleDebateMode(text: string, roles: DebateRoles, workflowId: string): Promise<void> {
   const stage = async (provider: AIProvider, role: keyof DebateRoles, prompt: string): Promise<string> => {
     const turnKey = `debate:${role}`;
-    const restored = contributionForTurn(activeCheckpoint?.workflowId === workflowId ? activeCheckpoint : undefined, turnKey);
-    if (restored) return restored.text;
     checkAborted(workflowId);
     await sendWorkflowStatus({ ...status(`workflow.debate.${role}`, provider), progress: workflowProgress(4) });
-    checkAborted(workflowId);
-    activeTurn = { key: turnKey, provider, role };
-    const response = await runRecoverableWorkflowStep(provider, prompt, workflowId, `role.${role}`, {
-      checkAborted,
-      createRequestId: createProviderRequestId,
-      sendRoleAssignment,
-      sendAndWait,
-      requestRecovery: requestStepRecovery,
-      resetProvider: resetProviderAfterFailure,
-      cancelWorkflow: abortWorkflow,
-      onAttempt: async (participant, requestId, attempt) => {
-        if (activeTurn?.key !== turnKey || activeTurn.provider !== participant) return;
-        await checkpointTurnAttempt(turnKey, participant, requestId, attempt);
-      },
-    });
-    await checkpointContribution(
-      turnKey,
-      provider,
-      response,
-      response === '(no response — skipped)' ? 'unavailable' : 'complete',
-      { role },
-    );
-    activeTurn = undefined;
-    return response;
+    return runSerialWorkflowTurn({ key: turnKey, provider, labelKey: `role.${role}`, role }, prompt, workflowId);
   };
   const proResponse = await stage(roles.pro, 'pro', PROMPTS.debate.pro(text));
   const conResponse = await stage(roles.con, 'con', PROMPTS.debate.con(text, proResponse));
@@ -1454,50 +1430,81 @@ async function handleDebateMode(text: string, roles: DebateRoles, workflowId: st
 }
 
 async function handleConsultMode(text: string, roles: ConsultRoles, workflowId: string): Promise<void> {
-  sendWorkflowStatus({ key: 'workflow.consult.initial', params: { first: name(roles.first), second: name(roles.second) } });
-  sendRoleAssignment(roles.first, 'role.first');
-  sendRoleAssignment(roles.second, 'role.second');
-  const [firstResponse, secondResponse] = await Promise.all([
-    sendAndWait(roles.first, PROMPTS.consult.first(text), workflowId),
-    sendAndWait(roles.second, PROMPTS.consult.second(text), workflowId),
-  ]);
-  checkAborted(workflowId);
-
-  sendWorkflowStatus(status('workflow.consult.review', roles.reviewer));
-  sendRoleAssignment(roles.reviewer, 'role.reviewer');
-  const reviewerResponse = await sendAndWait(
-    roles.reviewer,
-    PROMPTS.consult.reviewer(text, firstResponse, name(roles.first), secondResponse, name(roles.second)),
-    workflowId,
+  // The analyses are still independent, but their provider turns are serial.
+  // This avoids competing recovery dialogs and makes every request checkpointable.
+  await sendWorkflowStatus({ key: 'workflow.consult.initial', params: { first: name(roles.first), second: name(roles.second) }, progress: workflowProgress(4) });
+  const firstResponse = await runSerialWorkflowTurn(
+    { key: 'consult:first', provider: roles.first, labelKey: 'role.first', role: 'first' },
+    PROMPTS.consult.first(text), workflowId,
+  );
+  const secondResponse = await runSerialWorkflowTurn(
+    { key: 'consult:second', provider: roles.second, labelKey: 'role.second', role: 'second' },
+    PROMPTS.consult.second(text), workflowId,
   );
   checkAborted(workflowId);
 
-  sendWorkflowStatus(status('workflow.consult.summary', roles.summary));
-  sendRoleAssignment(roles.summary, 'role.summary');
-  await sendAndWait(
-    roles.summary,
-    PROMPTS.consult.summary(text, firstResponse, name(roles.first), secondResponse, name(roles.second), reviewerResponse, name(roles.reviewer)),
-    workflowId,
+  await sendWorkflowStatus({ ...status('workflow.consult.review', roles.reviewer), progress: workflowProgress(4) });
+  const reviewerResponse = await runSerialWorkflowTurn(
+    { key: 'consult:reviewer', provider: roles.reviewer, labelKey: 'role.reviewer', role: 'reviewer' },
+    PROMPTS.consult.reviewer(text, firstResponse, name(roles.first), secondResponse, name(roles.second)), workflowId,
+  );
+  checkAborted(workflowId);
+
+  await sendWorkflowStatus({ ...status('workflow.consult.summary', roles.summary), progress: workflowProgress(4) });
+  await runSerialWorkflowTurn(
+    { key: 'consult:summary', provider: roles.summary, labelKey: 'role.summary', role: 'summary' },
+    PROMPTS.consult.summary(text, firstResponse, name(roles.first), secondResponse, name(roles.second), reviewerResponse, name(roles.reviewer)), workflowId,
   );
 }
 
 async function handleCodingMode(text: string, roles: CodingRoles, workflowId: string): Promise<void> {
-  sendCodingStatus(1, roles.planner, 'coding.spec'); sendRoleAssignment(roles.planner, 'role.planner');
-  const spec = await sendAndWait(roles.planner, PROMPTS.coding.plannerSpec(text), workflowId); checkAborted(workflowId);
-  sendCodingStatus(2, roles.reviewer, 'coding.specReview'); sendRoleAssignment(roles.reviewer, 'role.reviewer');
-  const specReview = await sendAndWait(roles.reviewer, PROMPTS.coding.reviewerSpec(text, spec, name(roles.planner)), workflowId); checkAborted(workflowId);
-  sendCodingStatus(3, roles.coder, 'coding.codeV1'); sendRoleAssignment(roles.coder, 'role.coder');
-  const codeV1 = await sendAndWait(roles.coder, PROMPTS.coding.coderV1(text, spec, name(roles.planner), specReview, name(roles.reviewer)), workflowId); checkAborted(workflowId);
-  sendCodingStatus(4, roles.reviewer, 'coding.codeReview'); sendRoleAssignment(roles.reviewer, 'role.reviewer');
-  const codeReview = await sendAndWait(roles.reviewer, PROMPTS.coding.reviewerCode(text, codeV1, name(roles.coder)), workflowId); checkAborted(workflowId);
-  sendCodingStatus(5, roles.tester, 'coding.test'); sendRoleAssignment(roles.tester, 'role.tester');
-  const testReport = await sendAndWait(roles.tester, PROMPTS.coding.testerCases(text, codeV1, name(roles.coder)), workflowId); checkAborted(workflowId);
-  sendCodingStatus(6, roles.coder, 'coding.codeV2'); sendRoleAssignment(roles.coder, 'role.coder');
-  const codeV2 = await sendAndWait(roles.coder, PROMPTS.coding.coderV2(text, codeV1, codeReview, name(roles.reviewer), testReport, name(roles.tester)), workflowId); checkAborted(workflowId);
-  sendCodingStatus(7, roles.planner, 'coding.acceptance'); sendRoleAssignment(roles.planner, 'role.planner');
-  const acceptance = await sendAndWait(roles.planner, PROMPTS.coding.plannerAcceptance(text, codeV2, name(roles.coder), spec), workflowId); checkAborted(workflowId);
-  sendCodingStatus(8, roles.coder, 'coding.final'); sendRoleAssignment(roles.coder, 'role.coder');
-  await sendAndWait(roles.coder, PROMPTS.coding.coderFinal(text, codeV2, acceptance, name(roles.planner)), workflowId);
+  const stage = async (number: number, key: string, provider: AIProvider, role: string, actionKey: string, prompt: string): Promise<string> => {
+    sendCodingStatus(number, provider, actionKey);
+    return runSerialWorkflowTurn({ key: `coding:${key}`, provider, labelKey: `role.${role}`, role }, prompt, workflowId);
+  };
+  const spec = await stage(1, 'spec', roles.planner, 'planner', 'coding.spec', PROMPTS.coding.plannerSpec(text)); checkAborted(workflowId);
+  const specReview = await stage(2, 'spec-review', roles.reviewer, 'reviewer', 'coding.specReview', PROMPTS.coding.reviewerSpec(text, spec, name(roles.planner))); checkAborted(workflowId);
+  const codeV1 = await stage(3, 'code-v1', roles.coder, 'coder', 'coding.codeV1', PROMPTS.coding.coderV1(text, spec, name(roles.planner), specReview, name(roles.reviewer))); checkAborted(workflowId);
+  const codeReview = await stage(4, 'code-review', roles.reviewer, 'reviewer', 'coding.codeReview', PROMPTS.coding.reviewerCode(text, codeV1, name(roles.coder))); checkAborted(workflowId);
+  const testReport = await stage(5, 'test', roles.tester, 'tester', 'coding.test', PROMPTS.coding.testerCases(text, codeV1, name(roles.coder))); checkAborted(workflowId);
+  const codeV2 = await stage(6, 'code-v2', roles.coder, 'coder', 'coding.codeV2', PROMPTS.coding.coderV2(text, codeV1, codeReview, name(roles.reviewer), testReport, name(roles.tester))); checkAborted(workflowId);
+  const acceptance = await stage(7, 'acceptance', roles.planner, 'planner', 'coding.acceptance', PROMPTS.coding.plannerAcceptance(text, codeV2, name(roles.coder), spec)); checkAborted(workflowId);
+  await stage(8, 'final', roles.coder, 'coder', 'coding.final', PROMPTS.coding.coderFinal(text, codeV2, acceptance, name(roles.planner)));
+}
+
+async function runSerialWorkflowTurn(
+  turn: { key: string; provider: AIProvider; labelKey: string; role?: string; round?: number },
+  prompt: string,
+  workflowId: string,
+): Promise<string> {
+  return runCheckpointedRecoverableTurn(turn, prompt, workflowId, {
+    checkAborted,
+    createRequestId: createProviderRequestId,
+    sendRoleAssignment,
+    sendAndWait,
+    requestRecovery: requestStepRecovery,
+    resetProvider: resetProviderAfterFailure,
+    cancelWorkflow: abortWorkflow,
+    contributionForTurn: (turnKey) => contributionForTurn(
+      activeCheckpoint?.workflowId === workflowId ? activeCheckpoint : undefined,
+      turnKey,
+    ),
+    onTurnStarted: async (current) => {
+      activeTurn = { key: current.key, provider: current.provider, role: current.role, round: current.round };
+    },
+    onAttempt: async (provider, requestId, attempt) => {
+      if (activeTurn?.key !== turn.key || activeTurn.provider !== provider) return;
+      await checkpointTurnAttempt(turn.key, provider, requestId, attempt);
+    },
+    onTurnCompleted: async (current, response, requestId) => {
+      await checkpointContribution(current.key, current.provider, response, response === SKIP_RESPONSE ? 'unavailable' : 'complete', {
+        requestId,
+        role: current.role,
+        round: current.round,
+      });
+      activeTurn = undefined;
+    },
+  });
 }
 
 async function handleRoundtableMode(text: string, roles: RoundtableRoles, workflowId: string): Promise<void> {

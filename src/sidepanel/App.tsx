@@ -837,8 +837,8 @@ export default function App() {
             <h1 className="truncate text-sm font-bold text-slate-900">{t('app.title')}</h1>
             <p className="truncate text-xs text-slate-500">{t('app.subtitle')}</p>
           </div>
-          <span className="rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-semibold text-emerald-700">{connectedCount}/4 {t('app.connected')}</span>
-          <button type="button" onClick={() => setIsSettingsOpen(true)} className="grid h-9 w-9 place-items-center rounded-lg border border-slate-300 text-xl leading-none text-slate-700 hover:bg-slate-100" title={t('app.settings')} aria-label={t('app.settings')}>⚙</button>
+          <span className="shrink-0 whitespace-nowrap rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-semibold text-emerald-700">{connectedCount}/4 {t('app.connected')}</span>
+          <button type="button" onClick={() => setIsSettingsOpen(true)} className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-slate-300 text-xl leading-none text-slate-700 hover:bg-slate-100" title={t('app.settings')} aria-label={t('app.settings')}>⚙</button>
         </div>
       </header>
 
@@ -865,7 +865,12 @@ export default function App() {
 
         {mode !== 'free' && (
           <div className="mt-2">
-            <button type="button" onClick={() => setShowRoleConfig((current) => !current)} className="text-xs font-medium text-sky-700 hover:text-sky-900">{showRoleConfig ? t('roles.toggle.hide') : t('roles.toggle.show')}</button>
+            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+              <p className="min-w-0 break-words text-[11px] leading-relaxed text-slate-600">
+                {Object.entries(roles as unknown as Record<string, AIProvider>).map(([role, provider]) => `${t(`role.${role}`)}: ${AI_PROVIDERS[provider].name}`).join(' · ')}
+              </p>
+              <button type="button" onClick={() => setShowRoleConfig((current) => !current)} className="shrink-0 text-xs font-medium text-sky-700 hover:text-sky-900">{showRoleConfig ? t('roles.toggle.hide') : t('roles.toggle.show')}</button>
+            </div>
             {showRoleConfig && <RoleConfig providers={providers} mode={mode} roles={roles} onRolesChange={changeRoles} disabled={!hydrated || isProcessing} />}
           </div>
         )}
@@ -888,7 +893,7 @@ export default function App() {
             {t('workflow.progress', { completed: workflowStatus.progress.completed, total: workflowStatus.progress.total, attempts: workflowStatus.progress.recoveryAttempts })}
             {workflowStatus.progress.lastCheckpointAt && <span className="ml-2 text-slate-400">{t('workflow.checkpoint', { time: new Date(workflowStatus.progress.lastCheckpointAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) })}</span>}
           </div>}
-          {trace.length > 0 && <div className="max-h-28 space-y-1 overflow-y-auto border-t border-slate-200 p-2.5">{trace.slice(-8).map((entry) => <div key={entry.id} className="truncate text-[11px] text-slate-600">{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {entry.text}</div>)}</div>}
+          {trace.length > 0 && <div className="max-h-32 space-y-1 overflow-y-auto border-t border-slate-200 p-2.5">{trace.slice(-8).map((entry) => <div key={entry.id} className="break-words text-[11px] leading-relaxed text-slate-600">{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {entry.text}</div>)}</div>}
           {stepRecovery && (
             <div role="alert" className="border-t border-amber-200 bg-amber-50 p-2.5">
               <div className="text-xs font-semibold text-amber-900">{t('recovery.title', { provider: AI_PROVIDERS[stepRecovery.provider].name })}</div>
@@ -907,7 +912,8 @@ export default function App() {
       <ChatArea messages={messages} mode={mode} conversationId={activeConversationId} />
 
       <div className="flex-none border-t border-slate-200 bg-white px-3 py-1.5">
-        <div className="flex justify-end gap-3 text-xs text-slate-500">
+        <div className="flex flex-wrap justify-end gap-x-3 gap-y-1 text-xs text-slate-500">
+          <button type="button" onClick={startNewConversation} disabled={isProcessing} className="hover:text-sky-700 disabled:opacity-30">{t('app.new')}</button>
           <button type="button" onClick={exportConversation} disabled={!messages.length} className="hover:text-sky-700 disabled:opacity-30">{t('app.export')}</button>
           <button type="button" onClick={() => void publishConversation()} disabled={!messages.length || isPublishing} className="hover:text-sky-700 disabled:opacity-30">{isPublishing ? t('publish.publishing') : t('app.publish')}</button>
         </div>

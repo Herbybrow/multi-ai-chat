@@ -360,6 +360,14 @@ test('mode selector keeps a named group with exactly one pressed mode', () => {
   assert.match(markup, />Coding<\/span>/);
 });
 
+test('workflow controls keep role assignments, complete trace text, and New chat reachable in the panel', () => {
+  const source = readFileSync(new URL('../src/sidepanel/App.tsx', import.meta.url), 'utf8');
+  assert.match(source, /Object\.entries\(roles as unknown as Record<string, AIProvider>\)/);
+  assert.match(source, /break-words text-\[11px\] leading-relaxed text-slate-600/);
+  assert.doesNotMatch(source, /trace\.slice\(-8\).*className="truncate text-\[11px\]/s);
+  assert.match(source, /onClick=\{startNewConversation\}[^>]*>\{t\('app\.new'\)\}/);
+});
+
 test('ja, de and ko no longer fall back to English for product strings zh already translated', () => {
   const params = { provider: 'ChatGPT', providers: 'ChatGPT · Claude', ready: 'Meta AI', detail: 'closed', seconds: 30, status: '401' };
   const keys = [

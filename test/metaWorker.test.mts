@@ -976,18 +976,21 @@ test('Debate with Meta as pro retries only its failed stage with a fresh request
   )));
 });
 
-test('Consult sends Meta and the other first seat in parallel before review', async (t) => {
+test('Consult serializes independent first seats so each request has one recovery owner', async (t) => {
   const app = worker({ standbyProvider: 'grok' }, false);
   t.after(app.close);
   await app.ready;
   const running = app.send('consult', undefined, { roles: META_CONSULT });
-  await waitUntil(() => app.sent.length === 2, 'consult parallel first seats');
-  assert.deepEqual(app.sent.map((message) => message.provider).sort(), ['chatgpt', 'meta']);
+  await waitUntil(() => app.sent.length === 1, 'consult first seat');
+  assert.equal(app.sent[0].provider, 'meta');
+  app.complete(app.sent[0]);
+  await waitUntil(() => app.sent.length === 2, 'consult second seat');
+  assert.equal(app.sent[1].provider, 'chatgpt');
   assert.equal(app.sent.some((message) => message.provider === 'claude'), false);
-  for (const message of [...app.sent]) app.complete(message);
+  app.complete(app.sent[1]);
   await waitUntil(() => app.sent.some((message) => message.provider === 'claude'), 'consult reviewer');
   await completeRemaining(app, running);
-  assert.deepEqual([...app.sent.slice(0, 2).map((message) => message.provider)].sort(), ['chatgpt', 'meta']);
+  assert.deepEqual(app.sent.slice(0, 2).map((message) => message.provider), ['meta', 'chatgpt']);
   assert.deepEqual(app.sent.slice(2).map((message) => message.provider), ['claude', 'gemini']);
 });
 
