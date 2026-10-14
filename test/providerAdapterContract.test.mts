@@ -78,3 +78,11 @@ test('Claude rejects unrelated editors and send buttons outside its composer sco
   assert.equal(config.sendButtonFilter?.(element({ button: true, label: 'Send message' })), true);
   assert.equal(config.sendButtonFilter?.(element({ button: true })), false);
 });
+
+test('Gemini sends its verified first click without a background-tab timer, while ChatGPT tracks remounted responses semantically', () => {
+  const gemini = captureAdapter('gemini');
+  const chatgpt = captureAdapter('chatgpt');
+  assert.equal(gemini.sendConfirmation, 'single-activation');
+  assert.equal(gemini.immediateSendAfterInsertion, true);
+  assert.equal(chatgpt.responseTracking, 'semantic-latest');
+});

@@ -25,6 +25,10 @@ createContentScript({
   inputMatchesPrompt: geminiComposerMatches,
   preserveExistingDraft: true,
   sendConfirmation: 'single-activation',
+  // The verified click must not wait on a timer: Chrome can defer timers in a
+  // background provider tab, which otherwise leaves a valid draft unsent until
+  // the user visits Gemini.
+  immediateSendAfterInsertion: true,
 
   sendButtonSelectors: GEMINI_SEND_SELECTORS,
   sendButtonFilter: element => isVisibleGeminiElement(element) && isGeminiSendControl(element),

@@ -976,6 +976,39 @@ test('Debate with Meta as pro retries only its failed stage with a fresh request
   )));
 });
 
+test('Debate honors the explicit Meta → Grok → Gemini → ChatGPT map and scopes each provider to its own contribution', async (t) => {
+  const app = worker({ standbyProvider: 'claude' }, false);
+  t.after(app.close);
+  await app.ready;
+  const roles: DebateRoles = { pro: 'meta', con: 'grok', judge: 'gemini', summary: 'chatgpt' };
+  const topic = 'Should university students be allowed to use AI for assignments?';
+  const running = app.send('debate', undefined, { roles, text: topic });
+  const answers = ['META_OWN_PRO', 'GROK_OWN_CON', 'GEMINI_OWN_BALANCE', 'CHATGPT_OWN_AGREEMENT'];
+  for (const [index, provider] of ['meta', 'grok', 'gemini', 'chatgpt'].entries()) {
+    await waitUntil(() => app.sent.length === index + 1, `mapped Debate seat ${index + 1}`);
+    const request = app.sent[index];
+    assert.equal(request.provider, provider);
+    assert.match(request.payload.text, new RegExp(`You are ${AI_PROVIDERS[provider as AIProvider].name}, the single`));
+    assert.match(request.payload.text, /Return only your own contribution for this turn\./);
+    assert.match(request.payload.text, /Do not simulate, invent, attribute, or prewrite contributions/);
+    assert.match(request.payload.text, new RegExp(topic.replace(/[?]/g, '\\?')));
+    if (index > 0) assert.match(request.payload.text, new RegExp(answers[index - 1]));
+    app.complete(request, answers[index]);
+  }
+  assert.equal((await running).ok, true);
+  const diagnostics = app.broadcasts.filter((message) => message.action === 'WORKFLOW_DIAGNOSTIC');
+  for (const provider of ['meta', 'grok', 'gemini', 'chatgpt'] as AIProvider[]) {
+    assert.ok(diagnostics.some((message) => (
+      message.provider === provider && message.payload?.stage === 'prompt_constructed'
+        && message.payload?.workflowId && message.payload?.turnId
+    )), `${provider} prompt construction is traceable without prompt text`);
+    assert.ok(diagnostics.some((message) => (
+      message.provider === provider && message.payload?.stage === 'response_extracted'
+        && typeof message.payload?.responseLength === 'number'
+    )), `${provider} extraction is traceable without response text`);
+  }
+});
+
 test('Consult serializes independent first seats so each request has one recovery owner', async (t) => {
   const app = worker({ standbyProvider: 'grok' }, false);
   t.after(app.close);

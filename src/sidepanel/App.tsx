@@ -12,6 +12,7 @@ import type {
   StepRecoveryRequest,
   ThemeMode,
   AutonomousRecoverySettings,
+  WorkflowDiagnosticPayload,
   WorkflowStatusPayload,
 } from '../shared/types';
 import {
@@ -431,7 +432,20 @@ export default function App() {
           setIsProcessing(true);
           setWorkflowStatus(status);
           const text = formatWorkflowStatus(status);
-          setTrace((current) => current[current.length - 1]?.text === text ? current : [...current, { id: crypto.randomUUID(), text, timestamp: Date.now() }].slice(-25));
+          setTrace((current) => current[current.length - 1]?.text === text ? current : [...current, { id: crypto.randomUUID(), text, timestamp: Date.now() }].slice(-100));
+          break;
+        }
+        case 'WORKFLOW_DIAGNOSTIC': {
+          const diagnostic = message.payload as WorkflowDiagnosticPayload;
+          if (!diagnostic || diagnostic.clientId !== clientIdRef.current || diagnostic.sessionId !== activeConversationIdRef.current
+            || diagnostic.workflowId !== activeWorkflowIdRef.current || diagnostic.provider !== message.provider) break;
+          const providerName = AI_PROVIDERS[diagnostic.provider].name;
+          const role = diagnostic.role ? ` · ${t(`role.${diagnostic.role}`)}` : '';
+          const attempt = diagnostic.attempt ? ` · attempt ${diagnostic.attempt}` : '';
+          const length = diagnostic.responseLength === undefined ? '' : ` · ${diagnostic.responseLength} chars`;
+          const failure = diagnostic.failureKind ? ` · ${diagnostic.failureKind}` : '';
+          const text = `${providerName}${role} · ${diagnostic.stage}${attempt}${length}${failure}`;
+          setTrace((current) => [...current, { id: crypto.randomUUID(), text, timestamp: Date.now() }].slice(-100));
           break;
         }
       }
@@ -869,9 +883,9 @@ export default function App() {
               <p className="min-w-0 break-words text-[11px] leading-relaxed text-slate-600">
                 {Object.entries(roles as unknown as Record<string, AIProvider>).map(([role, provider]) => `${t(`role.${role}`)}: ${AI_PROVIDERS[provider].name}`).join(' · ')}
               </p>
-              <button type="button" onClick={() => setShowRoleConfig((current) => !current)} className="shrink-0 text-xs font-medium text-sky-700 hover:text-sky-900">{showRoleConfig ? t('roles.toggle.hide') : t('roles.toggle.show')}</button>
+              {mode !== 'debate' && <button type="button" onClick={() => setShowRoleConfig((current) => !current)} className="shrink-0 text-xs font-medium text-sky-700 hover:text-sky-900">{showRoleConfig ? t('roles.toggle.hide') : t('roles.toggle.show')}</button>}
             </div>
-            {showRoleConfig && <RoleConfig providers={providers} mode={mode} roles={roles} onRolesChange={changeRoles} disabled={!hydrated || isProcessing} />}
+            {((mode === 'debate') || showRoleConfig) && <RoleConfig providers={providers} mode={mode} roles={roles} onRolesChange={changeRoles} disabled={!hydrated || isProcessing} />}
           </div>
         )}
 
@@ -893,7 +907,7 @@ export default function App() {
             {t('workflow.progress', { completed: workflowStatus.progress.completed, total: workflowStatus.progress.total, attempts: workflowStatus.progress.recoveryAttempts })}
             {workflowStatus.progress.lastCheckpointAt && <span className="ml-2 text-slate-400">{t('workflow.checkpoint', { time: new Date(workflowStatus.progress.lastCheckpointAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) })}</span>}
           </div>}
-          {trace.length > 0 && <div className="max-h-32 space-y-1 overflow-y-auto border-t border-slate-200 p-2.5">{trace.slice(-8).map((entry) => <div key={entry.id} className="break-words text-[11px] leading-relaxed text-slate-600">{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {entry.text}</div>)}</div>}
+          {trace.length > 0 && <div className="max-h-56 space-y-1 overflow-y-auto border-t border-slate-200 p-2.5">{trace.map((entry) => <div key={entry.id} className="break-words text-[11px] leading-relaxed text-slate-600">{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {entry.text}</div>)}</div>}
           {stepRecovery && (
             <div role="alert" className="border-t border-amber-200 bg-amber-50 p-2.5">
               <div className="text-xs font-semibold text-amber-900">{t('recovery.title', { provider: AI_PROVIDERS[stepRecovery.provider].name })}</div>

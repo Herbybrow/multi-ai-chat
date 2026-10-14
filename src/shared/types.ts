@@ -1,3 +1,5 @@
+import type { SubmissionEvidence } from './autonomousRecovery';
+
 // === AI Providers ===
 
 export type AIProvider = 'chatgpt' | 'claude' | 'gemini' | 'grok' | 'meta';
@@ -87,6 +89,23 @@ export interface WorkflowStatusPayload {
   };
 }
 
+// Lifecycle telemetry intentionally carries only routing and state metadata.
+// It never contains prompts, provider response text, cookies, or credentials.
+export interface WorkflowDiagnosticPayload {
+  workflowId: string;
+  turnId: string;
+  provider: AIProvider;
+  stage: string;
+  requestId?: string;
+  role?: string;
+  attempt?: number;
+  submission?: SubmissionEvidence;
+  failureKind?: ProviderFailureKind;
+  responseLength?: number;
+  sessionId?: string;
+  clientId?: string;
+}
+
 export type StepRecoveryAction = 'retry' | 'skip' | 'cancel';
 
 export type AutonomousRecoveryPolicy = 'safe' | 'strict' | 'best-effort';
@@ -150,6 +169,7 @@ export type MessageAction =
   | 'RESTORE_PROVIDER_SESSIONS'
   | 'CONNECTIONS_UPDATE'
   | 'WORKFLOW_STATUS'
+  | 'WORKFLOW_DIAGNOSTIC'
   | 'ROLE_ASSIGNMENT'
   | 'STEP_RECOVERY_REQUIRED'
   | 'STEP_RECOVERY_PRESENTED'

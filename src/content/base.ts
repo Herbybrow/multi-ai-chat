@@ -54,6 +54,11 @@ export interface ContentScriptConfig {
   // Allow chunks while that signal still prevents premature completion.
   streamWhileThinking?: boolean;
   injectInput?: (element: Element, text: string, isActive?: () => boolean) => void | Promise<void>;
+  // Background tabs can have timers aggressively deferred. Providers that use a
+  // verified, single-activation Send control can opt into dispatching that first
+  // click immediately after controlled-editor readback instead of waiting for
+  // the generic cosmetic pre-send delay.
+  immediateSendAfterInsertion?: boolean;
   doneDelay?: number;
   chunkDebounce?: number;
 }
@@ -342,34 +347,37 @@ export function createContentScript(config: ContentScriptConfig): void {
       throw error;
     }
 
-    const delay = Math.max(0, PRE_SEND_DELAY_MS - (Date.now() - injectionStartedAt));
-    scheduleForRequest(() => {
-      void (async () => {
-        const firstAttempt = await activateSend(text, requestId, generation);
-        if (!isActiveRequest(requestId, generation)) return;
-        if (sendConfirmation !== 'heuristic') {
-          if (!firstAttempt.ok) {
-            finishWithError(encodeError(firstAttempt.errorKey ?? 'error.send_failed', {
-              provider, ...(firstAttempt.detail ? { detail: firstAttempt.detail } : {}),
-            }), requestId, workflowId, generation);
-            return;
-          }
-          // A dispatched click is uncertain until there is positive current-turn evidence.
-          // Never refill or activate again while an earlier action may still be accepted.
-          scheduleForRequest(() => {
-            if (sendStarted()) return;
-            finishWithError(encodeError('error.send_unconfirmed', { provider }), requestId, workflowId, generation);
-          }, STRICT_SEND_CONFIRMATION_TIMEOUT_MS, requestId, generation);
+    const beginFirstSendAttempt = async (): Promise<void> => {
+      const firstAttempt = await activateSend(text, requestId, generation);
+      if (!isActiveRequest(requestId, generation)) return;
+      if (sendConfirmation !== 'heuristic') {
+        if (!firstAttempt.ok) {
+          finishWithError(encodeError(firstAttempt.errorKey ?? 'error.send_failed', {
+            provider, ...(firstAttempt.detail ? { detail: firstAttempt.detail } : {}),
+          }), requestId, workflowId, generation);
           return;
         }
-        scheduleForRequest(
-          () => void retrySendIfStillPending(text, firstAttempt, requestId, generation),
-          SEND_RETRY_DELAY_MS,
-          requestId,
-          generation,
-        );
-      })();
-    }, delay, requestId, generation);
+        // A dispatched click is uncertain until there is positive current-turn evidence.
+        // Never refill or activate again while an earlier action may still be accepted.
+        scheduleForRequest(() => {
+          if (sendStarted()) return;
+          finishWithError(encodeError('error.send_unconfirmed', { provider }), requestId, workflowId, generation);
+        }, STRICT_SEND_CONFIRMATION_TIMEOUT_MS, requestId, generation);
+        return;
+      }
+      scheduleForRequest(
+        () => void retrySendIfStillPending(text, firstAttempt, requestId, generation),
+        SEND_RETRY_DELAY_MS,
+        requestId,
+        generation,
+      );
+    };
+    if (config.immediateSendAfterInsertion) {
+      await beginFirstSendAttempt();
+      return;
+    }
+    const delay = Math.max(0, PRE_SEND_DELAY_MS - (Date.now() - injectionStartedAt));
+    scheduleForRequest(() => { void beginFirstSendAttempt(); }, delay, requestId, generation);
   }
 
   async function retrySendIfStillPending(text: string, firstAttempt: SendActivationResult, requestId: string | undefined, generation: number): Promise<void> {

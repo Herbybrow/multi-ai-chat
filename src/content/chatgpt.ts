@@ -61,6 +61,10 @@ createContentScript({
     '[data-message-author-role="assistant"] .markdown',
     '[data-message-author-role="assistant"]',
   ],
+  // ChatGPT can remount the latest assistant turn while it transitions from
+  // streaming to complete. Compare semantic turn growth/text rather than DOM
+  // element identity so a visible remounted response is still collected.
+  responseTracking: 'semantic-latest',
 
   stopButtonSelectors: CHATGPT_STOP_SELECTORS,
   stopButtonFilter: isChatGptStopControl,
