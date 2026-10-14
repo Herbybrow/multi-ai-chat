@@ -1,7 +1,7 @@
 # PR #42 收斂交接（2026-09-20）
 
 本輪程式已收斂並推送至 `feat/meta-ai-provider`，停在 **`e801019`**。
-[PR #42](https://github.com/teddashh/multi-ai-chat/pull/42) 維持 **DRAFT**；本交接文件是其後的文件提交，沒有再改程式。
+[PR #42](https://github.com/TED-H-com/multi-ai-chat/pull/42) 維持 **DRAFT**；本交接文件是其後的文件提交，沒有再改程式。
 `READY_FOR_VM_REQC=yes` 表示可以交給 Conductor 重測，尚不代表完整 VM e2e 通過。
 
 ## 相較最初交接，又完成了什麼

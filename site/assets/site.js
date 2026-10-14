@@ -674,7 +674,7 @@
       if (typeof value === "string") element.setAttribute("alt", value);
     });
 
-    const desktopUrl = new URL("https://teddashh.github.io/multi-ai-chat-desktop/");
+    const desktopUrl = new URL("https://ted-h-com.github.io/multi-ai-chat-desktop/");
     if (["zh-TW", "ja", "de"].includes(activeLocale)) {
       desktopUrl.searchParams.set("lang", activeLocale);
     }

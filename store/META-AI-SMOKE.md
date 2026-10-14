@@ -68,11 +68,11 @@ prompt. Declining keeps Meta on standby, so the script cannot inject `content/me
 
 ## VM handoff: get the correct unpacked build
 
-PR: <https://github.com/teddashh/multi-ai-chat/pull/42> (`feat/meta-ai-provider`).
+PR: <https://github.com/TED-H-com/multi-ai-chat/pull/42> (`feat/meta-ai-provider`).
 Use a fresh checkout so an existing local branch or installed store copy cannot mask the build:
 
 ```sh
-git clone --branch feat/meta-ai-provider --single-branch https://github.com/teddashh/multi-ai-chat.git multi-ai-chat-pr42
+git clone --branch feat/meta-ai-provider --single-branch https://github.com/TED-H-com/multi-ai-chat.git multi-ai-chat-pr42
 cd multi-ai-chat-pr42
 git rev-parse HEAD
 git status --short

@@ -6,14 +6,14 @@ The listed package is `multi-ai-chat-store-v0.3.0.zip`.
 Copy each block into the matching field. Items marked **[you]** can only be done by the
 publishing Google account.
 
-**Live listing (v0.3.0):** source, `public/manifest.json`, and `dist/manifest.json` are 0.3.0. GitHub Release [v0.3.0](https://github.com/teddashh/multi-ai-chat/releases/tag/v0.3.0) publishes `multi-ai-chat-store-v0.3.0.zip`, and that package is the build the Chrome Web Store lists. The package adds an experimental Meta AI replacement while keeping four active providers and the original four as defaults. `https://www.meta.ai/*` and `https://meta.ai/*` are optional host permissions, requested only when the user activates Meta. Declining keeps Meta on standby. There is no static Meta content script; it is registered dynamically after access is granted. Authenticated Meta send and receive has not been exercised on a real signed-in page. That caveat is for user reports. Publishing this package did not depend on that exercise. The reference remains [the Meta AI smoke checklist](./META-AI-SMOKE.md). The summary and detailed description below name the four default providers. Experimental Meta AI stays off until the user activates it.
+**Live listing (v0.3.0):** source, `public/manifest.json`, and `dist/manifest.json` are 0.3.0. GitHub Release [v0.3.0](https://github.com/TED-H-com/multi-ai-chat/releases/tag/v0.3.0) publishes `multi-ai-chat-store-v0.3.0.zip`, and that package is the build the Chrome Web Store lists. The package adds an experimental Meta AI replacement while keeping four active providers and the original four as defaults. `https://www.meta.ai/*` and `https://meta.ai/*` are optional host permissions, requested only when the user activates Meta. Declining keeps Meta on standby. There is no static Meta content script; it is registered dynamically after access is granted. Authenticated Meta send and receive has not been exercised on a real signed-in page. That caveat is for user reports. Publishing this package did not depend on that exercise. The reference remains [the Meta AI smoke checklist](./META-AI-SMOKE.md). The summary and detailed description below name the four default providers. Experimental Meta AI stays off until the user activates it.
 
 ---
 
 ## 0. Before you upload: action items **[you]**
 
 1. **Register a developer account** at https://chrome.google.com/webstore/devconsole, one-time **US$5** fee (Google account + card). New accounts may need identity verification (can take a few days), and the publishing Google account must have **2-Step Verification** enabled.
-2. **Privacy policy.** Use the public repository copy at `https://github.com/teddashh/multi-ai-chat/blob/master/store/PRIVACY.md` (or mirror it on the developer's own domain). A privacy-policy URL is **required** because the extension reads page content.
+2. **Privacy policy.** Use the public repository copy at `https://github.com/TED-H-com/multi-ai-chat/blob/master/store/PRIVACY.md` (or mirror it on the developer's own domain). A privacy-policy URL is **required** because the extension reads page content.
 3. **Upload the package** `multi-ai-chat-store-v0.3.0.zip` (see §6 to regenerate). This v0.3.0 package is the live Chrome Web Store listing, updated 2026-09-23.
 4. **Add the screenshot and small promo tile** from `store/` (see §5).
 5. Fill the fields below, complete the **Privacy practices** tab (§4), then **Submit for review**.
@@ -117,7 +117,7 @@ Declare the following data types and reasons; leave every other type unchecked.
 - ☑ I do not use or transfer user data for purposes unrelated to the item's single purpose.
 - ☑ I do not use or transfer user data to determine creditworthiness or for lending.
 
-**Privacy policy URL:** `https://github.com/teddashh/multi-ai-chat/blob/master/store/PRIVACY.md`
+**Privacy policy URL:** `https://github.com/TED-H-com/multi-ai-chat/blob/master/store/PRIVACY.md`
 
 ---
 

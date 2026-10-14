@@ -2,7 +2,7 @@
 
 [English](./README.md) · [繁體中文](./README.zh-TW.md) · **日本語** · [Deutsch](./README.de.md) · [한국어](./README.ko.md)
 
-[Chrome ウェブストアからインストール](https://chromewebstore.google.com/detail/multi-ai-chat/nomhpmmhkmolkmpkjfeainjoifkipdah) · [公式サイト](https://teddashh.github.io/multi-ai-chat/?lang=ja) · [v0.3.0 リリース](https://github.com/teddashh/multi-ai-chat/releases/tag/v0.3.0) · [デスクトップ版](https://teddashh.github.io/multi-ai-chat-desktop/?lang=ja)
+[Chrome ウェブストアからインストール](https://chromewebstore.google.com/detail/multi-ai-chat/nomhpmmhkmolkmpkjfeainjoifkipdah) · [公式サイト](https://ted-h-com.github.io/multi-ai-chat/?lang=ja) · [v0.3.0 リリース](https://github.com/TED-H-com/multi-ai-chat/releases/tag/v0.3.0) · [デスクトップ版](https://ted-h-com.github.io/multi-ai-chat-desktop/?lang=ja)
 
 質問は一度だけ。4つのAIをまとめて動かせます。Multi-AI Chat は、ログイン済みの **ChatGPT、Claude、Gemini、Grok** タブを連携させる軽量な Chrome Side Panel です。普段アクセスしている provider ページをそのまま利用するため、モデルAPIキーも独自のチャットbackendも必要ありません。
 
@@ -20,14 +20,14 @@
 - **Meta の準備完了判定を厳しくしました。** ログイン用の操作がページに残っていても、使える入力欄は準備完了です。操作できない入力欄や、明示的なログイン画面は、ログインが必要であることを意味します。`data-disabled="true"` の入力欄や操作、`opacity: 0` で描かれているものは準備完了にしません。
 - **Workflow、設定、入力。** 直前の要求から遅れて届いた結果、provider の URL、送信失敗は、新しいチャットに入りません。会話の保存は最新のスナップショットを書き、読み取りに失敗したときは履歴を消さずに再試行し、壊れた行は読み飛ばします。準備ができていない provider は、Workflow や一部だけの自由送信の前に名前を示します。準備状態のヒントから、選択済みで未準備の provider を開けます。自由送信では、準備完了かつ有効な provider だけを選べます。パネルを閉じても自由送信の選択は残ります。IME の確定では下書きを送信しません。モード選択を表示し、キーボードフォーカスを見えるようにし、設定ダイアログのフォーカスは Escape か閉じるまでダイアログ内に保ちます。高さが足りないパネルでも送信とその他の入力操作を表示し、プロンプトには安定した翻訳済みラベルを付けます。設定ダイアログを閉じたあとに終わった Token の読み込みや保存は無視します。失敗した読み込みや保存は画面に残り、やり直すことができます。
 - **5つのインターフェース言語。** 待機、Meta の権限拒否、準備状態、設定、入力の文言を、English、繁體中文、日本語、Deutsch、한국어で用意しています。
-- **既知の制限。** Meta AI は実験的機能で、初期状態ではオフです。ログインした状態での送信と受信は、実際にログインしたページではまだ操作されていません。権限の確認、content script の動的登録、ブラウザ再起動後の保持は、ブラウザ上の実行ではなくユニットテストの範囲です。Meta がうまく動かないときは [issue を開いて](https://github.com/teddashh/multi-ai-chat/issues)ください。確認項目は[チェックリスト](./store/META-AI-SMOKE.md)にあります。他の4つには影響しません。
+- **既知の制限。** Meta AI は実験的機能で、初期状態ではオフです。ログインした状態での送信と受信は、実際にログインしたページではまだ操作されていません。権限の確認、content script の動的登録、ブラウザ再起動後の保持は、ブラウザ上の実行ではなくユニットテストの範囲です。Meta がうまく動かないときは [issue を開いて](https://github.com/TED-H-com/multi-ai-chat/issues)ください。確認項目は[チェックリスト](./store/META-AI-SMOKE.md)にあります。他の4つには影響しません。
 
 ## エディションを選ぶ
 
 | エディション | おすすめの用途 |
 |---|---|
 | **Browser extension（この repository）** | 普段使っている provider タブを小さな Chrome Side Panel から操作したい |
-| [Multi-AI Chat Desktop](https://teddashh.github.io/multi-ai-chat-desktop/?lang=ja) | provider ごとの独立 profile、集中表示できるライブ WebView、snapshot、replay、checkpoint、ローカルファイル workflow が必要 |
+| [Multi-AI Chat Desktop](https://ted-h-com.github.io/multi-ai-chat-desktop/?lang=ja) | provider ごとの独立 profile、集中表示できるライブ WebView、snapshot、replay、checkpoint、ローカルファイル workflow が必要 |
 
 どちらも provider のWeb sessionを使用し、モデルAPIキーは不要です。
 
@@ -66,7 +66,7 @@ GitHub Release の ZIP は手動インストール用のバックアップです
 
 > v0.3.0 は現在のリリースです。以下の ZIP と checksum は、その GitHub Release に添付された正式なファイルで、Chrome ウェブストアに掲載されている同じ v0.3.0 を手動インストールするためのものです。
 
-1. [`multi-ai-chat-store-v0.3.0.zip`](https://github.com/teddashh/multi-ai-chat/releases/download/v0.3.0/multi-ai-chat-store-v0.3.0.zip) と [checksum ファイル](https://github.com/teddashh/multi-ai-chat/releases/download/v0.3.0/multi-ai-chat-store-v0.3.0.zip.sha256)をダウンロードします。
+1. [`multi-ai-chat-store-v0.3.0.zip`](https://github.com/TED-H-com/multi-ai-chat/releases/download/v0.3.0/multi-ai-chat-store-v0.3.0.zip) と [checksum ファイル](https://github.com/TED-H-com/multi-ai-chat/releases/download/v0.3.0/multi-ai-chat-store-v0.3.0.zip.sha256)をダウンロードします。
 2. アーカイブを検証します。正しい SHA-256 は `d7e976872d2e19cf8867ea7562c263d7de31f175e706ea44b67a204db3233d80` です。
 
    ```powershell
@@ -88,7 +88,7 @@ GitHub Release の ZIP は手動インストール用のバックアップです
 必要環境：Chrome 114+、Node.js 22.18+、npm、Git。
 
 ```sh
-git clone https://github.com/teddashh/multi-ai-chat.git
+git clone https://github.com/TED-H-com/multi-ai-chat.git
 cd multi-ai-chat
 npm ci
 npm run verify
@@ -143,14 +143,14 @@ npm audit
 - `src/content/*.ts`：provider 固有の selector と editor strategy
 - `src/sidepanel/`：React UI、ローカル session、Markdown、theme、localization
 
-Pull Request の前に `npm run verify` を実行してください。Provider ページが動作しなくなった場合は、provider 名とブラウザーのバージョンを添えて [Issue](https://github.com/teddashh/multi-ai-chat/issues) を作成できます。スクリーンショットや log から prompt、応答、アカウント情報、Token を削除してください。
+Pull Request の前に `npm run verify` を実行してください。Provider ページが動作しなくなった場合は、provider 名とブラウザーのバージョンを添えて [Issue](https://github.com/TED-H-com/multi-ai-chat/issues) を作成できます。スクリーンショットや log から prompt、応答、アカウント情報、Token を削除してください。
 
 ## プロジェクトとクレジット
 
-- [公式サイト](https://teddashh.github.io/multi-ai-chat/?lang=ja)
-- [GitHub Releases](https://github.com/teddashh/multi-ai-chat/releases)
-- [ソースと Issue tracker](https://github.com/teddashh/multi-ai-chat)
-- [Multi-AI Chat Desktop](https://teddashh.github.io/multi-ai-chat-desktop/?lang=ja)
+- [公式サイト](https://ted-h-com.github.io/multi-ai-chat/?lang=ja)
+- [GitHub Releases](https://github.com/TED-H-com/multi-ai-chat/releases)
+- [ソースと Issue tracker](https://github.com/TED-H-com/multi-ai-chat)
+- [Multi-AI Chat Desktop](https://ted-h-com.github.io/multi-ai-chat-desktop/?lang=ja)
 - [MIT License](./LICENSE)
 
 [AI-Sister.com](https://ai-sister.com) のスポンサーにより開発されています。作者：Ted Huang（[TED@TED-H.com](mailto:TED@TED-H.com)、[ted-h.com](https://ted-h.com)）。
