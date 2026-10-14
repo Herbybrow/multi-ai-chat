@@ -6,6 +6,8 @@ import type {
   ConsultRoles,
   CodingRoles,
   RoundtableRoles,
+  AutonomousRecoverySettings,
+  ProviderFailureKind,
   StepRecoveryRequest,
   ExtensionMessage,
   WorkflowStatusPayload,
@@ -21,6 +23,33 @@ import {
 import { questionWithConversationContext } from '../shared/conversationContinuity';
 import { appendResponseLanguagePolicy } from '../shared/promptLanguage';
 import { encodeError } from '../shared/errors';
+import {
+  chooseAutonomousRecoveryAction,
+  DEFAULT_AUTONOMOUS_RECOVERY,
+  normalizeAutonomousRecoverySettings,
+  preserveStrongestSubmissionEvidence,
+  recoveryBackoffMs,
+  type SubmissionEvidence,
+} from '../shared/autonomousRecovery';
+import {
+  WORKFLOW_CHECKPOINT_STORAGE_KEY,
+  checkpointForClient,
+  checkpointTurnCompleted,
+  checkpointTurnFailed,
+  checkpointTurnStarted,
+  checkpointTurnState,
+  contributionForTurn,
+  createWorkflowCheckpoint,
+  normalizeWorkflowCheckpoint,
+  type WorkflowCheckpoint,
+  type WorkflowContributionCheckpoint,
+} from '../shared/workflowCheckpoint';
+import {
+  shouldAcceptProviderState,
+  isProviderRequestState,
+  submissionEvidenceForState,
+  type ProviderRequestState,
+} from '../shared/providerRequestState';
 import { getProviderReadiness } from '../shared/providerReadiness';
 import { getProviderFromUrl } from '../shared/providerUrl';
 import {
@@ -41,6 +70,7 @@ import {
   ProviderRequestError,
   runRecoverableWorkflowStep,
   runRoundtableWorkflow,
+  SKIP_RESPONSE,
   StepRecoveryCoordinator,
   StepRecoveryReplayCoordinator,
   transferStepRecoveryOwnership,
@@ -75,6 +105,8 @@ interface ResponseWaiter {
   deliveryReady: Promise<void>;
   releaseDelivery: () => void;
   deliveryAccepted: boolean;
+  providerState?: ProviderRequestState;
+  submission: SubmissionEvidence;
 }
 
 interface SendParams {
@@ -86,6 +118,7 @@ interface SendParams {
   targets?: AIProvider[];
   sessionId: string;
   clientId: string;
+  recovery?: AutonomousRecoverySettings;
 }
 
 const PROVIDERS = ALL_PROVIDERS;
@@ -107,6 +140,9 @@ let lastBroadcastConnectionsRevision = -1;
 const statusProbeRetries = new Map<AIProvider, { tabId: number; timer: ReturnType<typeof setTimeout> }>();
 
 const responseWaiters = new Map<string, ResponseWaiter>();
+let activeCheckpoint: WorkflowCheckpoint | undefined;
+let restoreInFlight: Promise<void> | undefined;
+let activeTurn: { key: string; provider: AIProvider; round?: number; role?: string } | undefined;
 const stepRecovery = new StepRecoveryCoordinator();
 const stepRecoveryReplay = new StepRecoveryReplayCoordinator();
 const workflowStartGate = new WorkflowStartGate();
@@ -383,9 +419,14 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
       relayProviderResponse(message, sender);
       return false;
 
+    case 'PROVIDER_REQUEST_STATE':
+      relayProviderRequestState(message, sender);
+      return false;
+
     case 'ROLE_ASSIGNMENT':
     case 'WORKFLOW_STATUS':
     case 'CHECK_STATUS':
+    case 'QUERY_PROVIDER_REQUEST_STATE':
     case 'STOP_GENERATION':
       return false;
   }
@@ -746,17 +787,22 @@ async function sendAndWait(
     checkAborted(workflowId);
     const providerError = response.match(/^\[Error:\s*(.+)]$/s);
     if (providerError) {
-      throw new ProviderRequestError(provider, workflowId, requestId, new Error(providerError[1]), true);
+      throw new ProviderRequestError(provider, workflowId, requestId, new Error(providerError[1]), true, submissionEvidenceForRequest(requestId));
     }
     if (!response.trim()) {
-      throw new ProviderRequestError(provider, workflowId, requestId, new Error(encodeError('error.no_response_text', { provider })));
+      throw new ProviderRequestError(provider, workflowId, requestId, new Error(encodeError('error.no_response_text', { provider })), true, submissionEvidenceForRequest(requestId));
     }
     return response;
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error;
     if (error instanceof ProviderRequestError) throw error;
-    throw new ProviderRequestError(provider, workflowId, requestId, error);
+    throw new ProviderRequestError(provider, workflowId, requestId, error, false, submissionEvidenceForRequest(requestId));
   }
+}
+
+function submissionEvidenceForRequest(requestId: string): SubmissionEvidence {
+  return responseWaiters.get(requestId)?.submission
+    ?? (activeCheckpoint?.current?.requestId === requestId ? activeCheckpoint.current.submission : 'not_submitted');
 }
 
 function createProviderRequestId(provider: AIProvider, workflowId: string): string {
@@ -772,9 +818,30 @@ function waitForResponse(provider: AIProvider, requestId: string, workflowId: st
     }, timeoutMs);
     responseWaiters.set(requestId, {
       provider, workflowId, resolve, reject, timer, relayTail: Promise.resolve(), settling: false,
-      deliveryReady, releaseDelivery, deliveryAccepted: false,
+      deliveryReady, releaseDelivery, deliveryAccepted: false, submission: 'not_submitted',
     });
   });
+}
+
+function relayProviderRequestState(message: ExtensionMessage, sender: chrome.runtime.MessageSender): void {
+  if (!message.requestId || !message.provider || !message.workflowId || !message.payload) return;
+  const waiter = responseWaiters.get(message.requestId);
+  const payload = message.payload as { state?: unknown; submission?: unknown };
+  if (!waiter
+    || waiter.provider !== message.provider
+    || waiter.workflowId !== message.workflowId
+    || waiter.tabId === undefined
+    || sender.tab?.id !== waiter.tabId
+    || !sender.tab.url
+    || getProviderFromUrl(sender.tab.url) !== waiter.provider
+    || (waiter.documentId !== undefined && (sender.documentId !== waiter.documentId || sender.frameId !== 0))
+    || !isProviderRequestState(payload.state)
+    || (payload.submission !== 'not_submitted' && payload.submission !== 'uncertain' && payload.submission !== 'submitted')) return;
+  const state = payload.state;
+  if (!shouldAcceptProviderState(waiter.providerState, state)) return;
+  waiter.providerState = state;
+  waiter.submission = payload.submission;
+  void checkpointProviderState(message.requestId, state, payload.submission, waiter.documentId);
 }
 
 function relayProviderResponse(message: ExtensionMessage, sender: chrome.runtime.MessageSender): void {
@@ -880,14 +947,17 @@ function checkAborted(workflowId: string): void {
 }
 
 async function handleSendMessage(params: SendParams): Promise<void> {
-  const workflowId = params.workflowId;
   try {
     await beginWorkflow(params);
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') return;
     throw error;
   }
+  await executeWorkflow(params);
+}
 
+async function executeWorkflow(params: SendParams): Promise<void> {
+  const workflowId = params.workflowId;
   try {
     checkAborted(workflowId);
     const question = questionWithConversationContext(params.text, params.context);
@@ -940,6 +1010,17 @@ async function beginWorkflow(params: SendParams): Promise<void> {
     activeWorkflowId = params.workflowId;
     activeSessionId = params.sessionId;
     activeClientId = params.clientId;
+    activeCheckpoint = createWorkflowCheckpoint({
+      workflowId: params.workflowId,
+      sessionId: params.sessionId,
+      clientId: params.clientId,
+      mode: params.mode,
+      text: params.text,
+      context: params.context,
+      roles: params.roles,
+      targets: params.targets,
+      recovery: normalizeAutonomousRecoverySettings(params.recovery),
+    });
     await workflowMarkerGate.run(() => chrome.storage.session.set({
       [ACTIVE_WORKFLOW_STORAGE_KEY]: {
         workflowId: params.workflowId,
@@ -948,7 +1029,80 @@ async function beginWorkflow(params: SendParams): Promise<void> {
         startedAt: Date.now(),
       },
     }));
+    await persistCheckpoint(activeCheckpoint);
   });
+}
+
+async function persistCheckpoint(checkpoint: WorkflowCheckpoint): Promise<void> {
+  activeCheckpoint = checkpoint;
+  await workflowMarkerGate.run(() => chrome.storage.local.set({ [WORKFLOW_CHECKPOINT_STORAGE_KEY]: checkpoint }));
+}
+
+async function checkpointProviderState(
+  requestId: string,
+  state: ProviderRequestState,
+  submission: SubmissionEvidence,
+  documentId?: string,
+): Promise<void> {
+  const checkpoint = activeCheckpoint;
+  if (!checkpoint?.current || checkpoint.current.requestId !== requestId) return;
+  let next = checkpointTurnState(checkpoint, requestId, state, submission);
+  if (documentId && next.current) next = { ...next, current: { ...next.current, documentId } };
+  await persistCheckpoint(next);
+}
+
+async function checkpointTurnAttempt(
+  turnKey: string,
+  provider: AIProvider,
+  requestId: string,
+  attempt: number,
+): Promise<void> {
+  const checkpoint = activeCheckpoint;
+  if (!checkpoint) return;
+  await persistCheckpoint(checkpointTurnStarted(checkpoint, {
+    turnKey,
+    provider,
+    requestId,
+    state: 'prompt_inserting',
+    submission: 'not_submitted',
+    attempt,
+  }));
+}
+
+async function checkpointContribution(
+  turnKey: string,
+  provider: AIProvider,
+  text: string,
+  status: WorkflowContributionCheckpoint['status'],
+  metadata: { requestId?: string; round?: number; role?: string } = {},
+): Promise<void> {
+  const checkpoint = activeCheckpoint;
+  if (!checkpoint) return;
+  await persistCheckpoint(checkpointTurnCompleted(checkpoint, {
+    turnKey,
+    provider,
+    text,
+    status,
+    completedAt: Date.now(),
+    ...metadata,
+  }));
+}
+
+async function checkpointFailure(
+  turnKey: string,
+  error: ProviderRequestError,
+  attempt: number,
+): Promise<void> {
+  const checkpoint = activeCheckpoint;
+  if (!checkpoint) return;
+  await persistCheckpoint(checkpointTurnFailed(checkpoint, {
+    turnKey,
+    provider: error.provider,
+    kind: classifyProviderFailure(error.message),
+    submission: error.submission,
+    attempt,
+    at: Date.now(),
+  }));
 }
 
 function isSendParams(value: unknown): value is SendParams {
@@ -967,6 +1121,22 @@ function isSendParams(value: unknown): value is SendParams {
 
 async function notifyInterruptedWorkflow(target?: { clientId?: string; sessionId?: string }): Promise<void> {
   if (activeWorkflowId) return;
+  if (restoreInFlight) {
+    await restoreInFlight;
+    return;
+  }
+  if (target?.clientId && target.sessionId) {
+    const restoreTarget = { clientId: target.clientId, sessionId: target.sessionId };
+    const checkpointStored = await chrome.storage.local.get(WORKFLOW_CHECKPOINT_STORAGE_KEY);
+    const checkpoint = normalizeWorkflowCheckpoint(checkpointStored[WORKFLOW_CHECKPOINT_STORAGE_KEY]);
+    if (checkpoint && checkpoint.sessionId === target.sessionId
+      && (checkpoint.mode === 'roundtable' || checkpoint.mode === 'debate')) {
+      restoreInFlight = restoreCheckpointedWorkflow(checkpoint, restoreTarget)
+        .finally(() => { restoreInFlight = undefined; });
+      await restoreInFlight;
+      return;
+    }
+  }
   const stored = await workflowMarkerGate.run(() => chrome.storage.session.get(ACTIVE_WORKFLOW_STORAGE_KEY));
   if (activeWorkflowId) return;
   const interrupted = stored[ACTIVE_WORKFLOW_STORAGE_KEY] as { workflowId?: string; sessionId?: string; clientId?: string } | undefined;
@@ -989,11 +1159,235 @@ async function notifyInterruptedWorkflow(target?: { clientId?: string; sessionId
   await clearPersistedWorkflow(interruptedWorkflowId);
 }
 
+async function restoreCheckpointedWorkflow(
+  checkpoint: WorkflowCheckpoint,
+  target: { clientId: string; sessionId: string },
+): Promise<void> {
+  if (activeWorkflowId || checkpoint.sessionId !== target.sessionId) return;
+  if (!workflowLifecycle.register({ workflowId: checkpoint.workflowId, sessionId: checkpoint.sessionId, clientId: target.clientId })) return;
+  activeWorkflowId = checkpoint.workflowId;
+  activeSessionId = checkpoint.sessionId;
+  activeClientId = target.clientId;
+  workflowAborted = false;
+  workflowProviders.clear();
+  lastWorkflowStatus = undefined;
+  lastRoleAssignment = undefined;
+  activeCheckpoint = checkpointForClient(checkpoint, target.clientId);
+  await persistCheckpoint(activeCheckpoint);
+  await workflowMarkerGate.run(() => chrome.storage.session.set({
+    [ACTIVE_WORKFLOW_STORAGE_KEY]: {
+      workflowId: checkpoint.workflowId,
+      sessionId: checkpoint.sessionId,
+      clientId: target.clientId,
+      startedAt: checkpoint.createdAt,
+    },
+  }));
+
+  try {
+    await sendWorkflowStatus({ key: 'workflow.resuming' }, checkpoint.workflowId, checkpoint.sessionId, target.clientId);
+    await reconcileCheckpointRequest();
+    checkAborted(checkpoint.workflowId);
+    await executeWorkflow({
+      workflowId: checkpoint.workflowId,
+      sessionId: checkpoint.sessionId,
+      clientId: target.clientId,
+      text: checkpoint.text,
+      context: checkpoint.context,
+      mode: checkpoint.mode,
+      roles: checkpoint.roles,
+      targets: checkpoint.targets,
+      recovery: checkpoint.recovery,
+    });
+  } catch (error) {
+    if (!(error instanceof DOMException && error.name === 'AbortError')) {
+      await sendSystemError(errorMessage(error), checkpoint.workflowId);
+    }
+    // executeWorkflow performs normal finalization. A failure before it begins
+    // is terminal only after reporting the actual failure to the same panel.
+    if (activeWorkflowId === checkpoint.workflowId) {
+      await sendWorkflowStatus({ key: '', done: true, cancelled: false }, checkpoint.workflowId, checkpoint.sessionId, target.clientId);
+      await clearPersistedWorkflow(checkpoint.workflowId);
+      activeWorkflowId = undefined;
+      activeSessionId = undefined;
+      activeClientId = undefined;
+    }
+  } finally {
+    workflowLifecycle.finish(checkpoint.workflowId);
+  }
+}
+
+async function reconcileCheckpointRequest(): Promise<void> {
+  const checkpoint = activeCheckpoint;
+  const current = checkpoint?.current;
+  if (!checkpoint || !current) return;
+  const connection = connections[current.provider];
+  if (connection.status !== 'connected' || !connection.tabId) {
+    await resolveCheckpointUncertainty(current, current.submission);
+    return;
+  }
+  const documentId = await currentTopFrameDocumentId(connection.tabId);
+  if (!documentId) {
+    await resolveCheckpointUncertainty(current, 'uncertain');
+    return;
+  }
+  const responsePromise = waitForResponse(current.provider, current.requestId, checkpoint.workflowId);
+  const waiter = responseWaiters.get(current.requestId);
+  if (!waiter) return;
+  waiter.tabId = connection.tabId;
+  waiter.documentId = documentId;
+  waiter.deliveryAccepted = true;
+  waiter.releaseDelivery();
+  let snapshot: { state?: unknown; submission?: unknown; response?: unknown } | undefined;
+  try {
+    snapshot = await deliverToTab(current.provider, connection.tabId, {
+      action: 'QUERY_PROVIDER_REQUEST_STATE',
+      provider: current.provider,
+      requestId: current.requestId,
+      workflowId: checkpoint.workflowId,
+    }, { documentId }) as typeof snapshot;
+  } catch {
+    rejectResponseWaiter(current.requestId, new Error(encodeError('error.send_unconfirmed', { provider: current.provider })));
+    await responsePromise.catch(() => {});
+    await resolveCheckpointUncertainty(current, 'uncertain');
+    return;
+  }
+  const state = isProviderRequestState(snapshot?.state) ? snapshot.state : 'idle';
+  const observedSubmission = snapshot?.submission === 'not_submitted' || snapshot?.submission === 'uncertain' || snapshot?.submission === 'submitted'
+    ? snapshot.submission : submissionEvidenceForState(state);
+  const submission = preserveStrongestSubmissionEvidence(current.submission, observedSubmission);
+  await checkpointProviderState(current.requestId, state, submission, documentId);
+  if (state === 'response_complete' && typeof snapshot?.response === 'string' && snapshot.response.trim()) {
+    resolveResumedResponse(current.requestId, snapshot.response);
+  } else if (state === 'idle') {
+    rejectResponseWaiter(current.requestId, new Error(encodeError('error.send_unconfirmed', { provider: current.provider })));
+    await responsePromise.catch(() => {});
+    await resolveCheckpointUncertainty(current, submission);
+    return;
+  }
+  try {
+    const response = await responsePromise;
+    const providerError = response.match(/^\[Error:\s*(.+)]$/s);
+    if (providerError || !response.trim()) {
+      throw new ProviderRequestError(
+        current.provider,
+        checkpoint.workflowId,
+        current.requestId,
+        new Error(providerError?.[1] ?? encodeError('error.no_response_text', { provider: current.provider })),
+        true,
+        submission,
+      );
+    }
+    await checkpointContribution(current.turnKey, current.provider, response, 'complete', checkpointMetadata(current));
+  } catch (error) {
+    const providerError = error instanceof ProviderRequestError
+      ? error
+      : new ProviderRequestError(current.provider, checkpoint.workflowId, current.requestId, error, true, submission);
+    await resolveCheckpointFailure(current, providerError);
+  }
+}
+
+function resolveResumedResponse(requestId: string, response: string): void {
+  const waiter = responseWaiters.get(requestId);
+  if (!waiter) return;
+  clearTimeout(waiter.timer);
+  responseWaiters.delete(requestId);
+  void chrome.runtime.sendMessage({
+    action: 'RESPONSE_DONE',
+    provider: waiter.provider,
+    requestId,
+    workflowId: waiter.workflowId,
+    payload: response,
+  }).catch(() => {});
+  waiter.resolve(response);
+}
+
+async function resolveCheckpointUncertainty(
+  current: NonNullable<WorkflowCheckpoint['current']>,
+  submission: SubmissionEvidence,
+): Promise<void> {
+  if (submission === 'not_submitted') {
+    const checkpoint = activeCheckpoint;
+    if (checkpoint?.current?.requestId === current.requestId) {
+      await persistCheckpoint({ ...checkpoint, current: undefined, updatedAt: Date.now(), lastCheckpointAt: Date.now() });
+    }
+    return;
+  }
+  await resolveCheckpointFailure(current, new ProviderRequestError(
+    current.provider,
+    activeWorkflowId ?? '',
+    current.requestId,
+    new Error(encodeError('error.send_unconfirmed', { provider: current.provider })),
+    true,
+    submission,
+  ));
+}
+
+async function resolveCheckpointFailure(
+  current: NonNullable<WorkflowCheckpoint['current']>,
+  error: ProviderRequestError,
+): Promise<void> {
+  activeTurn = { key: current.turnKey, provider: current.provider, ...checkpointMetadata(current) };
+  const attempt = current.attempt;
+  await checkpointFailure(current.turnKey, error, attempt);
+  const automatic = chooseAutonomousRecoveryAction({
+    settings: activeCheckpoint?.recovery ?? DEFAULT_AUTONOMOUS_RECOVERY,
+    failureKind: classifyProviderFailure(error.message),
+    reason: error.message,
+    submission: error.submission,
+    attempts: attempt,
+  });
+  if (automatic === 'skip') {
+    await checkpointContribution(current.turnKey, current.provider, SKIP_RESPONSE, 'unavailable', checkpointMetadata(current));
+    activeTurn = undefined;
+    return;
+  }
+  if (automatic === 'retry' && error.submission === 'not_submitted') {
+    const checkpoint = activeCheckpoint;
+    if (checkpoint?.current?.requestId === current.requestId) {
+      await persistCheckpoint({ ...checkpoint, current: undefined, updatedAt: Date.now(), lastCheckpointAt: Date.now() });
+    }
+    activeTurn = undefined;
+    return;
+  }
+  const action = await requestStepRecovery(current.provider, error, activeWorkflowId ?? '', current.requestId, {
+    failureAlreadyRecorded: true,
+  });
+  if (action === 'skip') {
+    await checkpointContribution(current.turnKey, current.provider, SKIP_RESPONSE, 'unavailable', checkpointMetadata(current));
+    activeTurn = undefined;
+    return;
+  }
+  if (action === 'retry' && error.submission === 'not_submitted') {
+    const checkpoint = activeCheckpoint;
+    if (checkpoint?.current?.requestId === current.requestId) {
+      await persistCheckpoint({ ...checkpoint, current: undefined, updatedAt: Date.now(), lastCheckpointAt: Date.now() });
+    }
+    activeTurn = undefined;
+    return;
+  }
+  await abortWorkflow(activeWorkflowId);
+  throw new DOMException('Workflow cancelled', 'AbortError');
+}
+
+function checkpointMetadata(current: NonNullable<WorkflowCheckpoint['current']>): { round?: number; role?: string; requestId?: string } {
+  const roundtable = /^roundtable:(\d+):\d+$/.exec(current.turnKey);
+  const debate = /^debate:(.+)$/.exec(current.turnKey);
+  return {
+    requestId: current.requestId,
+    ...(roundtable ? { round: Number(roundtable[1]) } : {}),
+    ...(debate ? { role: debate[1] } : {}),
+  };
+}
+
 async function clearPersistedWorkflow(workflowId: string): Promise<void> {
   await workflowMarkerGate.run(async () => {
     const stored = await chrome.storage.session.get(ACTIVE_WORKFLOW_STORAGE_KEY);
     const active = stored[ACTIVE_WORKFLOW_STORAGE_KEY] as { workflowId?: string } | undefined;
     if (active?.workflowId === workflowId) await chrome.storage.session.remove(ACTIVE_WORKFLOW_STORAGE_KEY);
+    const checkpointStored = await chrome.storage.local.get(WORKFLOW_CHECKPOINT_STORAGE_KEY);
+    const checkpoint = normalizeWorkflowCheckpoint(checkpointStored[WORKFLOW_CHECKPOINT_STORAGE_KEY]);
+    if (checkpoint?.workflowId === workflowId) await chrome.storage.local.remove(WORKFLOW_CHECKPOINT_STORAGE_KEY);
+    if (activeCheckpoint?.workflowId === workflowId) activeCheckpoint = undefined;
   });
 }
 
@@ -1023,10 +1417,14 @@ async function handleFreeMode(text: string, requestedTargets: AIProvider[] | und
 
 async function handleDebateMode(text: string, roles: DebateRoles, workflowId: string): Promise<void> {
   const stage = async (provider: AIProvider, role: keyof DebateRoles, prompt: string): Promise<string> => {
+    const turnKey = `debate:${role}`;
+    const restored = contributionForTurn(activeCheckpoint?.workflowId === workflowId ? activeCheckpoint : undefined, turnKey);
+    if (restored) return restored.text;
     checkAborted(workflowId);
-    await sendWorkflowStatus(status(`workflow.debate.${role}`, provider));
+    await sendWorkflowStatus({ ...status(`workflow.debate.${role}`, provider), progress: workflowProgress(4) });
     checkAborted(workflowId);
-    return runRecoverableWorkflowStep(provider, prompt, workflowId, `role.${role}`, {
+    activeTurn = { key: turnKey, provider, role };
+    const response = await runRecoverableWorkflowStep(provider, prompt, workflowId, `role.${role}`, {
       checkAborted,
       createRequestId: createProviderRequestId,
       sendRoleAssignment,
@@ -1034,7 +1432,20 @@ async function handleDebateMode(text: string, roles: DebateRoles, workflowId: st
       requestRecovery: requestStepRecovery,
       resetProvider: resetProviderAfterFailure,
       cancelWorkflow: abortWorkflow,
+      onAttempt: async (participant, requestId, attempt) => {
+        if (activeTurn?.key !== turnKey || activeTurn.provider !== participant) return;
+        await checkpointTurnAttempt(turnKey, participant, requestId, attempt);
+      },
     });
+    await checkpointContribution(
+      turnKey,
+      provider,
+      response,
+      response === '(no response — skipped)' ? 'unavailable' : 'complete',
+      { role },
+    );
+    activeTurn = undefined;
+    return response;
   };
   const proResponse = await stage(roles.pro, 'pro', PROMPTS.debate.pro(text));
   const conResponse = await stage(roles.con, 'con', PROMPTS.debate.con(text, proResponse));
@@ -1090,19 +1501,46 @@ async function handleCodingMode(text: string, roles: CodingRoles, workflowId: st
 }
 
 async function handleRoundtableMode(text: string, roles: RoundtableRoles, workflowId: string): Promise<void> {
+  const checkpoint = activeCheckpoint?.workflowId === workflowId ? activeCheckpoint : undefined;
+  const initialHistory = checkpoint?.contributions
+    .filter((item) => item.turnKey.startsWith('roundtable:'))
+    .sort((left, right) => left.turnKey.localeCompare(right.turnKey, undefined, { numeric: true }))
+    .map((item) => ({ name: name(item.provider), round: item.round ?? 1, text: item.text }));
   await runRoundtableWorkflow(text, roles, workflowId, {
     checkAborted,
     providerName: name,
     buildPrompt: PROMPTS.roundtable.buildPrompt,
     createRequestId: createProviderRequestId,
     sendStatus: async (round, participant) => {
-      await sendWorkflowStatus({ key: 'workflow.roundtable', params: { round, labelKey: `round.${round}`, provider: name(participant) } });
+      await sendWorkflowStatus({
+        key: 'workflow.roundtable',
+        params: { round, labelKey: `round.${round}`, provider: name(participant) },
+        progress: workflowProgress(20),
+      });
     },
     sendRoleAssignment,
     sendAndWait,
     requestRecovery: requestStepRecovery,
     resetProvider: resetProviderAfterFailure,
     cancelWorkflow: abortWorkflow,
+    initialHistory,
+    onTurnStart: async (turn) => {
+      activeTurn = { key: turn.key, provider: turn.participant, round: turn.round };
+    },
+    onAttempt: async (participant, requestId, attempt) => {
+      if (!activeTurn || activeTurn.provider !== participant) return;
+      await checkpointTurnAttempt(activeTurn.key, participant, requestId, attempt);
+    },
+    onTurnComplete: async (turn, response) => {
+      await checkpointContribution(
+        turn.key,
+        turn.participant,
+        response,
+        response === '(no response — skipped)' ? 'unavailable' : 'complete',
+        { round: turn.round },
+      );
+      activeTurn = undefined;
+    },
   });
 }
 
@@ -1112,6 +1550,16 @@ function sendCodingStatus(current: number, provider: AIProvider, actionKey: stri
 
 function status(key: string, provider: AIProvider): WorkflowStatusPayload {
   return { key, params: { provider: name(provider) } };
+}
+
+function workflowProgress(total: number): NonNullable<WorkflowStatusPayload['progress']> {
+  const checkpoint = activeCheckpoint;
+  return {
+    completed: checkpoint?.contributions.length ?? 0,
+    total,
+    recoveryAttempts: checkpoint?.failures.length ?? 0,
+    lastCheckpointAt: checkpoint?.lastCheckpointAt,
+  };
 }
 
 function name(provider: AIProvider): string {
@@ -1154,14 +1602,40 @@ async function sendRoleAssignment(
   }).catch(() => {});
 }
 
-function requestStepRecovery(
+async function requestStepRecovery(
   provider: AIProvider,
   error: unknown,
   workflowId: string,
   failedRequestId: string,
+  options: { failureAlreadyRecorded?: boolean } = {},
 ): Promise<'retry' | 'skip' | 'cancel'> {
   checkAborted(workflowId);
   if (!activeSessionId || !activeClientId) throw new DOMException('Workflow cancelled', 'AbortError');
+  const requestError = error instanceof ProviderRequestError ? error : undefined;
+  const checkpoint = activeCheckpoint;
+  const attempt = checkpoint?.current?.requestId === failedRequestId ? checkpoint.current.attempt : 1;
+  if (requestError && checkpoint?.current && !options.failureAlreadyRecorded) {
+    await checkpointFailure(checkpoint.current.turnKey, requestError, attempt);
+  }
+  const failureKind = classifyProviderFailure(errorMessage(error));
+  const submission = requestError?.submission ?? 'uncertain';
+  const automatic = chooseAutonomousRecoveryAction({
+    settings: checkpoint?.recovery ?? DEFAULT_AUTONOMOUS_RECOVERY,
+    failureKind,
+    reason: errorMessage(error),
+    submission,
+    attempts: attempt,
+  });
+  if (automatic === 'retry') {
+    await sendWorkflowStatus({ key: 'workflow.recovering', params: { provider: name(provider), attempt } });
+    await delay(recoveryBackoffMs(attempt));
+    checkAborted(workflowId);
+    return 'retry';
+  }
+  if (automatic === 'skip') {
+    await sendWorkflowStatus({ key: 'workflow.provider_unavailable', params: { provider: name(provider) } });
+    return 'skip';
+  }
   return stepRecovery.waitForDecision(
     {
       workflowId,
@@ -1170,7 +1644,8 @@ function requestStepRecovery(
       provider,
       failedRequestId,
       reason: errorMessage(error),
-      failureKind: classifyProviderFailure(errorMessage(error)),
+      failureKind,
+      retryAllowed: submission === 'not_submitted',
     },
     broadcastStepRecovery,
     (_request, presented) => new Error(encodeError(

@@ -1,4 +1,6 @@
 import type { AIProvider, ExtensionMessage } from '../shared/types';
+import { submissionEvidenceForState, type ProviderRequestState } from '../shared/providerRequestState';
+import type { SubmissionEvidence } from '../shared/autonomousRecovery';
 import { encodeError } from '../shared/errors';
 import {
   extractResponseContent,
@@ -74,6 +76,13 @@ interface CancelledRequestCleanup extends SettledRequestIdentity {
   deadline: number;
   stopActivated: boolean;
   timer?: number;
+}
+
+interface CompletedContentRequest {
+  requestId: string;
+  workflowId: string;
+  text: string;
+  completedAt: number;
 }
 
 const INPUT_RETRY_MS = 250;
@@ -153,6 +162,8 @@ export function createContentScript(config: ContentScriptConfig): void {
   let sendDispatched = false;
   let thinkingAtRequestStart = false;
   let cancelledRequestCleanup: CancelledRequestCleanup | undefined;
+  let recentCompletedRequest: CompletedContentRequest | undefined;
+  let lastReportedRequestState: ProviderRequestState | undefined;
   const sendTimeouts = new Set<number>();
 
   const queryInput = (): Element | null => queryFirst(
@@ -193,6 +204,18 @@ export function createContentScript(config: ContentScriptConfig): void {
     chrome.runtime.sendMessage(message).catch(() => {});
   }
 
+  function reportRequestState(state: ProviderRequestState, submission: SubmissionEvidence): void {
+    if (!activeRequestId || !activeWorkflowId || lastReportedRequestState === state) return;
+    lastReportedRequestState = state;
+    safeSendMessage({
+      action: 'PROVIDER_REQUEST_STATE',
+      provider,
+      requestId: activeRequestId,
+      workflowId: activeWorkflowId,
+      payload: { state, submission },
+    });
+  }
+
   function cleanup(): void {
     if (disposed) return;
     disposed = true;
@@ -202,6 +225,8 @@ export function createContentScript(config: ContentScriptConfig): void {
     activePromptText = '';
     lastActivatedInput = undefined;
     failedRequestTombstone = undefined;
+    recentCompletedRequest = undefined;
+    lastReportedRequestState = undefined;
     clearCancelledRequestCleanup();
     clearResponseTimers();
     if (statusInterval !== undefined) clearInterval(statusInterval);
@@ -278,6 +303,8 @@ export function createContentScript(config: ContentScriptConfig): void {
     activePromptText = text;
     thinkingAtRequestStart = isThinking();
     lastActivatedInput = undefined;
+    lastReportedRequestState = undefined;
+    reportRequestState('prompt_inserting', 'not_submitted');
     startResponsePolling();
 
     const input = await retryLookup(queryInput, INPUT_TIMEOUT_MS, () => isActiveRequest(requestId, generation));
@@ -294,6 +321,7 @@ export function createContentScript(config: ContentScriptConfig): void {
     }
     if ((preserveExistingDraft || sendConfirmation === 'matching-user-message') && readInputText(input).trim()
       && !inputTextMatches(input, text)) {
+      reportRequestState('existing_draft', 'not_submitted');
       const reason = encodeError('error.existing_draft', { provider });
       finishWithError(reason, requestId, workflowId, generation);
       throw new Error(reason);
@@ -308,6 +336,7 @@ export function createContentScript(config: ContentScriptConfig): void {
       await Promise.resolve();
       if (!isActiveRequest(requestId, generation)) throw new Error('request cancelled during input injection');
       assertInputLanded(input, text);
+      reportRequestState('prompt_inserted', 'not_submitted');
     } catch (error) {
       finishWithError(encodeError('error.input_injection_failed', { provider, detail: errorMessage(error) }), requestId, workflowId, generation);
       throw error;
@@ -438,16 +467,21 @@ export function createContentScript(config: ContentScriptConfig): void {
         matchingUserMessageElement = undefined;
         responseWaitStartedAt = Date.now();
       }
+      reportRequestState('submission_pending', 'uncertain');
       sendDispatched = true;
       const ok = clickElement(sendButton);
       return { ok, path: 'button-click', detail: ok ? undefined : 'send control could not be activated' };
     }
     if (sendButton && !isDisabled(sendButton) && clickElement(sendButton)) {
+      reportRequestState('submission_pending', 'uncertain');
       sendDispatched = true;
       return { ok: true, path: 'button-click' };
     }
     const ok = dispatchEnter(input);
-    if (ok) sendDispatched = true;
+    if (ok) {
+      reportRequestState('submission_pending', 'uncertain');
+      sendDispatched = true;
+    }
     return { ok, path: 'enter-key', detail: ok ? undefined : 'Enter dispatch failed' };
   }
 
@@ -526,6 +560,7 @@ export function createContentScript(config: ContentScriptConfig): void {
       if (accepted) {
         sawGenerationActivity = true;
         sendDispatched = true;
+        reportRequestState('submission_accepted', 'submitted');
       }
       return accepted;
     }
@@ -537,10 +572,12 @@ export function createContentScript(config: ContentScriptConfig): void {
       const accepted = hasNewMatchingUserMessage() || hasCurrentResponse
         || (sendDispatched && !thinkingAtRequestStart && isCurrentTurnThinking());
       if (accepted) sawGenerationActivity = true;
+      if (accepted) reportRequestState('submission_accepted', 'submitted');
       return accepted;
     }
     if (isCurrentTurnThinking()) {
       sawGenerationActivity = true;
+      reportRequestState('submission_accepted', 'submitted');
       return true;
     }
     const hasCurrentResponse = responseTracking === 'semantic-latest'
@@ -548,11 +585,13 @@ export function createContentScript(config: ContentScriptConfig): void {
       : queryResponses().some((element) => !responseBaselineEls.has(element));
     if (hasCurrentResponse) {
       sawGenerationActivity = true;
+      reportRequestState('submission_accepted', 'submitted');
       return true;
     }
     const hasNewUserMessage = hasNewMatchingUserMessage();
     if (hasNewUserMessage) {
       sawGenerationActivity = true;
+      reportRequestState('submission_accepted', 'submitted');
       return true;
     }
     const input = queryInput();
@@ -563,7 +602,10 @@ export function createContentScript(config: ContentScriptConfig): void {
       Boolean(config.requireSameComposerForClearConfirmation),
       hasNewUserMessage,
     );
-    if (confirmedByClear) sawGenerationActivity = true;
+    if (confirmedByClear) {
+      sawGenerationActivity = true;
+      reportRequestState('submission_accepted', 'submitted');
+    }
     return confirmedByClear;
   }
 
@@ -636,6 +678,7 @@ export function createContentScript(config: ContentScriptConfig): void {
     const currentText = getLatestResponseText();
     if (!currentText || currentText === lastResponseText) return;
     sawGenerationActivity = true;
+    reportRequestState('generating', 'submitted');
     lastResponseText = currentText;
     const now = Date.now();
     if (now - lastChunkTime >= chunkDebounce) {
@@ -721,6 +764,10 @@ export function createContentScript(config: ContentScriptConfig): void {
     const text = longerResponseText(lastResponseText, getLatestResponseText());
     const requestId = activeRequestId;
     const workflowId = activeWorkflowId;
+    if (requestId && workflowId) {
+      recentCompletedRequest = { requestId, workflowId, text, completedAt: Date.now() };
+      reportRequestState('response_complete', 'submitted');
+    }
     resetResponseState();
     failedRequestTombstone = undefined;
     safeSendMessage({ action: 'RESPONSE_DONE', provider, requestId, workflowId, payload: text });
@@ -734,6 +781,10 @@ export function createContentScript(config: ContentScriptConfig): void {
     const failedRequest = settlesActiveRequest && (requestId !== undefined || workflowId !== undefined)
       ? { requestId, workflowId, dispatched: sendDispatched }
       : undefined;
+    const failureState: ProviderRequestState = reason.includes('error.existing_draft')
+      ? 'existing_draft'
+      : sendDispatched ? 'uncertain_submission' : 'recoverable_failure';
+    reportRequestState(failureState, sendDispatched ? 'uncertain' : 'not_submitted');
     resetResponseState();
     // Recovery arrives after RESPONSE_DONE has settled the background waiter. Keep only this
     // exact failed identity so its later scoped STOP can still click a provider stream that
@@ -828,6 +879,7 @@ export function createContentScript(config: ContentScriptConfig): void {
     lastActivatedInput = undefined;
     sawGenerationActivity = false;
     sendDispatched = false;
+    lastReportedRequestState = undefined;
   }
 
   function isActiveRequest(requestId?: string, generation = responseGeneration): boolean {
@@ -894,6 +946,38 @@ export function createContentScript(config: ContentScriptConfig): void {
       // explicit probe even when our locally observed status has not changed.
       reportStatus(true);
       sendResponse({ ok: true });
+      return true;
+    }
+    if (message.action === 'QUERY_PROVIDER_REQUEST_STATE' && message.provider === provider) {
+      const requestId = message.requestId;
+      const workflowId = message.workflowId;
+      if (!requestId || !workflowId) {
+        sendResponse({ state: 'idle', submission: 'not_submitted' });
+        return true;
+      }
+      if (waitingForResponse && requestId === activeRequestId && workflowId === activeWorkflowId) {
+        const state: ProviderRequestState = lastReportedRequestState ?? (lastResponseText ? 'generating'
+          : sendDispatched ? 'submission_pending' : 'prompt_inserting');
+        sendResponse({ state, submission: submissionEvidenceForState(state) });
+        return true;
+      }
+      if (recentCompletedRequest
+        && recentCompletedRequest.requestId === requestId
+        && recentCompletedRequest.workflowId === workflowId) {
+        sendResponse({ state: 'response_complete', submission: 'submitted', response: recentCompletedRequest.text });
+        return true;
+      }
+      if (failedRequestTombstone
+        && failedRequestTombstone.requestId === requestId
+        && failedRequestTombstone.workflowId === workflowId) {
+        const submission = failedRequestTombstone.dispatched ? 'uncertain' : 'not_submitted';
+        sendResponse({
+          state: failedRequestTombstone.dispatched ? 'uncertain_submission' : 'recoverable_failure',
+          submission,
+        });
+        return true;
+      }
+      sendResponse({ state: 'idle', submission: 'not_submitted' });
       return true;
     }
     if (message.action === 'STOP_GENERATION' && (!message.provider || message.provider === provider)) {

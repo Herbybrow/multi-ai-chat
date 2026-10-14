@@ -170,6 +170,9 @@ function content(t: TestContext, options: {
     stop: (requestId = 'request') => command({
       action: 'STOP_GENERATION', provider: 'grok', requestId, workflowId: 'workflow',
     }),
+    queryRequest: (requestId = 'request') => command({
+      action: 'QUERY_PROVIDER_REQUEST_STATE', provider: 'grok', requestId, workflowId: 'workflow',
+    }),
     inputReady() { inputAvailable = true; },
     thinking(value: boolean) { thinking = value; },
     replaceComposer(draft = '') { input.isConnected = false; input = Object.assign(new Textarea(), { value: draft }); },
@@ -236,6 +239,15 @@ test('single activation reports uncertainty after one click without Enter or aut
   assert.deepEqual(app.counts(), { clicks: 1, enters: 0, injections: 1 });
   assert.equal(app.draft(), '');
   assert.match(app.done()[0]?.payload, /error.send_unconfirmed/);
+});
+
+test('a settled dispatched failure retains uncertain ownership for a restarted worker', async t => {
+  const app = content(t, { single: true, preserveExistingDraft: true });
+  await app.send();
+  await app.advance(15000);
+  const snapshot = await app.queryRequest();
+  assert.equal(snapshot.state, 'uncertain_submission');
+  assert.equal(snapshot.submission, 'uncertain');
 });
 
 for (const remount of [false, true]) {

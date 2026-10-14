@@ -55,7 +55,12 @@ function worker(
   autoRespond = true,
   readiness: Partial<Record<AIProvider, boolean | null>> = {},
   missingTabs: AIProvider[] = [],
-  extras: { session?: Record<string, unknown>; rejectSend?: AIProvider[]; metaHostPermitted?: boolean } = {},
+  extras: {
+    session?: Record<string, unknown>;
+    rejectSend?: AIProvider[];
+    metaHostPermitted?: boolean;
+    resumeSnapshot?: { state: string; submission: 'not_submitted' | 'uncertain' | 'submitted'; response?: string };
+  } = {},
 ) {
   const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
   const sent: any[] = [];
@@ -142,6 +147,7 @@ function worker(
           if (autoRespond) complete(sent.at(-1));
           if (sendAcknowledgement.current) return await sendAcknowledgement.current(sent.at(-1));
         }
+        if (message.action === 'QUERY_PROVIDER_REQUEST_STATE') return extras.resumeSnapshot ?? { state: 'idle', submission: 'not_submitted' };
         if (message.action === 'STOP_GENERATION') stops.push({ ...message, tabId: id });
         return { ok: true };
       },
@@ -290,6 +296,7 @@ function worker(
       clientId?: string;
       workflowId?: string;
       text?: string;
+      recovery?: { enabled: boolean; policy: 'safe' | 'strict' | 'best-effort' };
     } = {}) => {
       const payload = {
         workflowId: options.workflowId ?? crypto.randomUUID(),
@@ -298,6 +305,7 @@ function worker(
         text: options.text ?? 'Hello',
         mode,
         targets,
+        recovery: options.recovery,
         roles: options.roles,
       };
       return command({ action: 'SEND_MESSAGE', payload }).then((result) => ({ ...result, ...payload }));
@@ -1005,6 +1013,26 @@ test('Roundtable worker retries a failed Meta turn with a fresh request id', asy
   assert.equal(app.sent.filter((message) => message.provider === 'meta').length, 6);
 });
 
+test('enabled Safe Automatic retries only a confirmed-unsent Roundtable insertion failure', async (t) => {
+  const app = worker({ standbyProvider: 'grok' }, false);
+  t.after(app.close);
+  await app.ready;
+  const running = app.send('roundtable', undefined, {
+    roles: META_ROUNDTABLE,
+    recovery: { enabled: true, policy: 'safe' },
+  });
+  await waitUntil(() => app.sent.length === 1, 'first safe automatic send');
+  const first = app.sent[0];
+  app.fail(first, '[Error: i18n:{"key":"error.input_not_found","params":{"provider":"meta"}}]');
+  await waitUntil(() => app.sent.length === 2, 'bounded automatic retry', 4_000);
+  assert.equal(app.sent[1].provider, 'meta');
+  assert.notEqual(app.sent[1].requestId, first.requestId);
+  assert.equal(app.broadcasts.some((message) => message.action === 'STEP_RECOVERY_REQUIRED'), false);
+  assert.ok(app.broadcasts.some((message) => message.payload?.key === 'workflow.recovering'));
+  await completeRemaining(app, running);
+  assert.equal(app.sent.length, 21);
+});
+
 for (const mode of ['debate', 'roundtable'] as const) {
   test(`${mode} ignores responses from the wrong request, provider, workflow, tab or URL`, async (t) => {
     const app = worker({}, false);
@@ -1529,6 +1557,67 @@ test('removing an unrelated host does not reset an active Meta seat', async (t) 
   assert.equal(app.local.standbyProvider, 'grok');
   assert.deepEqual(app.local.freeTargets, ['chatgpt', 'claude', 'gemini', 'meta']);
   assert.equal(app.broadcasts.some((message) => message.action === 'PROVIDER_SELECTION_UPDATE'), false);
+});
+
+test('a replacement worker resumes a Roundtable checkpoint from an owned completed response', async (t) => {
+  const first = worker({ standbyProvider: 'grok' }, false);
+  t.after(first.close);
+  await first.ready;
+  const running = first.send('roundtable', undefined, { roles: META_ROUNDTABLE });
+  void running.catch(() => {});
+  await waitUntil(() => first.sent.length === 1, 'checkpointed Meta opening turn');
+  const checkpointStore = { ...first.local };
+  const markerStore = { ...first.session };
+  const checkpoint = checkpointStore.multiAiWorkflowCheckpoint as { current?: { requestId?: string; turnKey?: string } } | undefined;
+  assert.equal(checkpoint?.current?.requestId, first.sent[0].requestId);
+  assert.equal(checkpoint?.current?.turnKey, 'roundtable:1:0');
+
+  const second = worker(checkpointStore, false, {}, [], {
+    session: markerStore,
+    resumeSnapshot: { state: 'response_complete', submission: 'submitted', response: 'restored English opening' },
+  });
+  t.after(second.close);
+  await second.ready;
+  await second.command({ action: 'GET_CONNECTIONS', payload: { clientId: 'panel-2', sessionId: 'session' } });
+  await waitUntil(() => second.sent.length === 1, 'second participant after resume');
+  assert.equal(second.sent[0].provider, 'chatgpt');
+  assert.ok(second.broadcasts.some((message) => (
+    message.action === 'RESPONSE_DONE' && message.payload === 'restored English opening'
+  )));
+  assert.equal(second.broadcasts.some((message) => decodeError(String(message.payload))?.key === 'error.worker_stopped'), false);
+  const completed = new Set<string>();
+  await waitUntil(() => {
+    for (const message of second.sent) {
+      if (!message.requestId || completed.has(message.requestId)) continue;
+      completed.add(message.requestId);
+      second.complete(message);
+    }
+    return second.broadcasts.some((message) => message.payload?.done === true && message.payload?.cancelled === false);
+  }, 'resumed Roundtable completion', 8_000);
+  assert.equal(second.sent.length, 19);
+});
+
+test('a restart never replays a checkpoint whose accepted-send evidence outlives the content script', async (t) => {
+  const first = worker({ standbyProvider: 'grok' }, false);
+  t.after(first.close);
+  await first.ready;
+  const running = first.send('roundtable', undefined, { roles: META_ROUNDTABLE });
+  void running.catch(() => {});
+  await waitUntil(() => first.sent.length === 1, 'Roundtable request with persisted evidence');
+  const checkpointStore = structuredClone(first.local) as Record<string, any>;
+  checkpointStore.multiAiWorkflowCheckpoint.current.submission = 'submitted';
+  checkpointStore.multiAiWorkflowCheckpoint.current.state = 'submission_accepted';
+  const second = worker(checkpointStore, false, {}, [], { session: { ...first.session } });
+  t.after(second.close);
+  await second.ready;
+  await second.command({ action: 'GET_CONNECTIONS', payload: { clientId: 'panel-2', sessionId: 'session' } });
+  await waitUntil(() => second.broadcasts.some((message) => message.action === 'STEP_RECOVERY_REQUIRED'), 'manual recovery for ambiguous restored send');
+  const recovery = second.broadcasts.find((message) => message.action === 'STEP_RECOVERY_REQUIRED')!.payload;
+  assert.equal(recovery.retryAllowed, false);
+  assert.equal(second.sent.length, 0);
+  assert.equal((await second.command({ action: 'RESOLVE_STEP_RECOVERY', payload: { ...recovery, action: 'retry' } })).ok, false);
+  assert.equal((await second.command({ action: 'RESOLVE_STEP_RECOVERY', payload: { ...recovery, action: 'cancel' } })).ok, true);
+  await waitUntil(() => second.broadcasts.some((message) => message.payload?.done === true && message.payload?.cancelled === true), 'restored cancellation');
 });
 
 test('a replacement worker tells the reopened panel that a Meta workflow was interrupted', async (t) => {

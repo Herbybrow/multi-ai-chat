@@ -258,6 +258,8 @@ test('open Settings dialog describes loading token and wires token error ids', (
   assert.match(markup, /id="settings-token-status" role="status"/);
   assert.match(markup, /id="standby-provider"[^>]*aria-describedby="standby-help"/);
   assert.match(markup, /id="standby-help"/);
+  assert.match(markup, /id="recovery-enabled"[^>]*type="checkbox"/);
+  assert.match(markup, /id="recovery-policy"[^>]*disabled=""/);
   const source = readFileSync(new URL('../src/sidepanel/components/SettingsModal.tsx', import.meta.url), 'utf8');
   assert.match(source, /shared\/metaOrigins/);
   assert.doesNotMatch(source, /background\/metaHostAccess/);

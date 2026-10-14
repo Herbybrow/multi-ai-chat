@@ -11,6 +11,7 @@ import type {
   StepRecoveryDecision,
   StepRecoveryRequest,
   ThemeMode,
+  AutonomousRecoverySettings,
   WorkflowStatusPayload,
 } from '../shared/types';
 import {
@@ -46,6 +47,7 @@ import {
   selectedActiveTargets,
 } from '../shared/providerSelection';
 import { decodeError, ERROR_MARKER } from '../shared/errors';
+import { DEFAULT_AUTONOMOUS_RECOVERY, normalizeAutonomousRecoverySettings } from '../shared/autonomousRecovery';
 import { getProviderReadiness } from '../shared/providerReadiness';
 import { openUnreadyProviders } from './openUnreadyProviders';
 import { createWorkflowCancellation, createWorkflowScope } from '../shared/workflowScope';
@@ -149,6 +151,7 @@ export default function App() {
   const [pendingRoles, setPendingRoles] = useState<Record<string, string>>({});
   const [locale, setLocale] = useState<Locale>(getLocale());
   const [theme, setTheme] = useState<ThemeMode>('system');
+  const [autonomousRecovery, setAutonomousRecovery] = useState<AutonomousRecoverySettings>(DEFAULT_AUTONOMOUS_RECOVERY);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState('');
   const [providerUrls, setProviderUrls] = useState<Partial<Record<AIProvider, string>>>({});
@@ -229,7 +232,7 @@ export default function App() {
     let cancelled = false;
     let retryTimer: number | undefined;
     let attempt = 0;
-    const keys = ['language', 'theme', 'conversations', 'activeConversationId', 'freeTargets', 'standbyProvider'];
+    const keys = ['language', 'theme', 'conversations', 'activeConversationId', 'freeTargets', 'standbyProvider', 'autonomousRecovery'];
     const load = () => {
       chrome.storage.local.get(keys, (stored) => {
         if (cancelled) return;
@@ -246,6 +249,7 @@ export default function App() {
 
         const savedTheme = stored.theme as ThemeMode | undefined;
         if (savedTheme && THEME_MODES.includes(savedTheme)) setTheme(savedTheme);
+        setAutonomousRecovery(normalizeAutonomousRecoverySettings(stored.autonomousRecovery));
 
         const standby = normalizeStandbyProvider(stored.standbyProvider);
         const savedConversations = usableConversations(stored.conversations);
@@ -527,6 +531,7 @@ export default function App() {
         mode,
         roles: mode === 'free' ? undefined : roles,
         targets: mode === 'free' ? freeTargets : undefined,
+        recovery: autonomousRecovery,
       },
     }).then((response: { ok?: boolean; error?: string } | undefined) => {
       if (response?.ok === false) throw new Error(response.error ?? 'The workflow was not accepted');
@@ -538,7 +543,7 @@ export default function App() {
       setMessages((current) => [...current, { id: `system-${crypto.randomUUID()}`, role: 'ai', provider: 'system' as AIProvider, content: `${ERROR_MARKER} ${String(error)}`, timestamp: Date.now() }]);
       setIsProcessing(false);
     });
-  }, [activeConversationId, contextNeedsReplay, freeTargets, isProcessing, messages, mode, roles]);
+  }, [activeConversationId, autonomousRecovery, contextNeedsReplay, freeTargets, isProcessing, messages, mode, roles]);
 
   const stopWorkflow = useCallback(() => {
     conversationRevisionRef.current += 1;
@@ -711,6 +716,12 @@ export default function App() {
     void chrome.storage.local.set({ theme: nextTheme });
   };
 
+  const changeAutonomousRecovery = (next: AutonomousRecoverySettings) => {
+    const normalized = normalizeAutonomousRecoverySettings(next);
+    setAutonomousRecovery(normalized);
+    void chrome.storage.local.set({ autonomousRecovery: normalized });
+  };
+
   const changeStandbyProvider = async (next: AIProvider) => {
     const result = await chrome.runtime.sendMessage({
       action: 'SET_STANDBY_PROVIDER', payload: { standbyProvider: next },
@@ -873,6 +884,10 @@ export default function App() {
 
         <details className="mt-2 rounded-lg border border-slate-200 bg-white" open={isProcessing}>
           <summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-slate-700"><span className={`mr-2 inline-block h-2 w-2 rounded-full ${isProcessing ? 'animate-pulse bg-sky-500' : 'bg-emerald-500'}`} />{t('trace.title')} · <span className="font-normal text-slate-500">{currentStatus}</span></summary>
+          {workflowStatus?.progress && <div className="border-t border-slate-100 px-2.5 py-1.5 text-[11px] text-slate-600">
+            {t('workflow.progress', { completed: workflowStatus.progress.completed, total: workflowStatus.progress.total, attempts: workflowStatus.progress.recoveryAttempts })}
+            {workflowStatus.progress.lastCheckpointAt && <span className="ml-2 text-slate-400">{t('workflow.checkpoint', { time: new Date(workflowStatus.progress.lastCheckpointAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) })}</span>}
+          </div>}
           {trace.length > 0 && <div className="max-h-28 space-y-1 overflow-y-auto border-t border-slate-200 p-2.5">{trace.slice(-8).map((entry) => <div key={entry.id} className="truncate text-[11px] text-slate-600">{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {entry.text}</div>)}</div>}
           {stepRecovery && (
             <div role="alert" className="border-t border-amber-200 bg-amber-50 p-2.5">
@@ -880,7 +895,7 @@ export default function App() {
               {stepRecovery.failureKind && <div className="mt-1 text-[11px] font-medium text-amber-900">{t(`recovery.failure.${stepRecovery.failureKind}`)}</div>}
               <div className="mt-1 break-words text-[11px] leading-relaxed text-amber-800">{humanizeError(stepRecovery.reason)}</div>
               <div className="mt-2 flex flex-wrap gap-1.5">
-                <button type="button" disabled={isResolvingRecovery} onClick={() => void resolveStepRecovery('retry')} className="rounded-lg bg-sky-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-800 disabled:opacity-50">{t('recovery.retry')}</button>
+                <button type="button" disabled={isResolvingRecovery || stepRecovery.retryAllowed === false} onClick={() => void resolveStepRecovery('retry')} className="rounded-lg bg-sky-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-800 disabled:opacity-50">{t('recovery.retry')}</button>
                 <button type="button" disabled={isResolvingRecovery} onClick={() => void resolveStepRecovery('skip')} className="rounded-lg border border-amber-400 bg-white px-2.5 py-1 text-[11px] font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-50">{t('recovery.skip')}</button>
                 <button type="button" disabled={isResolvingRecovery} onClick={() => void resolveStepRecovery('cancel')} className="rounded-lg border border-red-300 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50">{t('recovery.cancel')}</button>
               </div>
@@ -927,7 +942,7 @@ export default function App() {
         </div>
       )}
 
-      <SettingsModal isOpen={isSettingsOpen} locale={locale} onLocaleChange={changeLocale} theme={theme} onThemeChange={changeTheme} standbyProvider={standbyProvider} onStandbyChange={changeStandbyProvider} providerSelectionDisabled={!hydrated || isProcessing} onClose={() => setIsSettingsOpen(false)} />
+      <SettingsModal isOpen={isSettingsOpen} locale={locale} onLocaleChange={changeLocale} theme={theme} onThemeChange={changeTheme} autonomousRecovery={autonomousRecovery} onAutonomousRecoveryChange={changeAutonomousRecovery} standbyProvider={standbyProvider} onStandbyChange={changeStandbyProvider} providerSelectionDisabled={!hydrated || isProcessing} onClose={() => setIsSettingsOpen(false)} />
     </div>
   );
 }

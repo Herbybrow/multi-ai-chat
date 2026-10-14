@@ -5,6 +5,7 @@ import type {
   StepRecoveryDecision,
   StepRecoveryRequest,
 } from '../shared/types';
+import type { SubmissionEvidence } from '../shared/autonomousRecovery';
 
 export const SKIP_RESPONSE = '(no response — skipped)';
 // Keep this below Chrome's five-minute extension event lifetime so the timeout can
@@ -16,6 +17,7 @@ export class ProviderRequestError extends Error {
   readonly workflowId: string;
   readonly requestId: string;
   readonly alreadyDelivered: boolean;
+  readonly submission: SubmissionEvidence;
 
   constructor(
     provider: AIProvider,
@@ -23,6 +25,7 @@ export class ProviderRequestError extends Error {
     requestId: string,
     reason: unknown,
     alreadyDelivered = false,
+    submission: SubmissionEvidence = 'not_submitted',
   ) {
     super(reason instanceof Error ? reason.message : String(reason));
     this.name = 'ProviderRequestError';
@@ -30,6 +33,7 @@ export class ProviderRequestError extends Error {
     this.workflowId = workflowId;
     this.requestId = requestId;
     this.alreadyDelivered = alreadyDelivered;
+    this.submission = submission;
   }
 }
 
@@ -92,6 +96,7 @@ export class StepRecoveryCoordinator {
   resolve(decision: unknown): boolean {
     const pending = this.pending;
     if (!pending || !isStepRecoveryDecision(decision) || !sameRecovery(pending.request, decision)) return false;
+    if (decision.action === 'retry' && pending.request.retryAllowed === false) return false;
     this.pending = undefined;
     clearTimeout(pending.timer);
     pending.resolve(decision.action);
@@ -181,12 +186,16 @@ export interface RecoverableWorkflowDependencies {
   ) => Promise<StepRecoveryAction>;
   resetProvider: (participant: AIProvider, failedRequestId: string, workflowId: string) => Promise<void>;
   cancelWorkflow: (workflowId: string) => Promise<void>;
+  onAttempt?: (participant: AIProvider, requestId: string, attempt: number) => Promise<void> | void;
 }
 
 export interface RoundtableWorkflowDependencies extends RecoverableWorkflowDependencies {
   providerName: (participant: AIProvider) => string;
   buildPrompt: (text: string, round: number, participantName: string, history: RoundtableHistoryItem[]) => string;
   sendStatus: (round: number, participant: AIProvider) => Promise<void>;
+  initialHistory?: RoundtableHistoryItem[];
+  onTurnStart?: (turn: { key: string; round: number; index: number; participant: AIProvider; labelKey: string }) => Promise<void> | void;
+  onTurnComplete?: (turn: { key: string; round: number; index: number; participant: AIProvider; labelKey: string }, response: string) => Promise<void> | void;
 }
 
 export async function runRoundtableWorkflow(
@@ -196,17 +205,26 @@ export async function runRoundtableWorkflow(
   dependencies: RoundtableWorkflowDependencies,
 ): Promise<RoundtableHistoryItem[]> {
   const participants: AIProvider[] = [roles.first, roles.second, roles.third, roles.fourth];
-  const history: RoundtableHistoryItem[] = [];
+  const history: RoundtableHistoryItem[] = [...(dependencies.initialHistory ?? [])];
+  let index = 0;
   for (let round = 1; round <= 5; round += 1) {
     for (const participant of participants) {
+      const turn = { key: `roundtable:${round}:${index}`, round, index, participant, labelKey: `round.${round}` };
+      if (index < history.length) {
+        index += 1;
+        continue;
+      }
       dependencies.checkAborted(workflowId);
       await dependencies.sendStatus(round, participant);
       dependencies.checkAborted(workflowId);
-      const labelKey = `round.${round}`;
+      const labelKey = turn.labelKey;
       const participantName = dependencies.providerName(participant);
       const prompt = dependencies.buildPrompt(text, round, participantName, history);
+      await dependencies.onTurnStart?.(turn);
       const response = await runRecoverableWorkflowStep(participant, prompt, workflowId, labelKey, dependencies);
       history.push({ name: participantName, round, text: response });
+      await dependencies.onTurnComplete?.(turn, response);
+      index += 1;
     }
   }
   return history;
@@ -219,9 +237,12 @@ export async function runRecoverableWorkflowStep(
   labelKey: string,
   dependencies: RecoverableWorkflowDependencies,
 ): Promise<string> {
+  let attempt = 0;
   for (;;) {
     dependencies.checkAborted(workflowId);
     const requestId = dependencies.createRequestId(participant, workflowId);
+    attempt += 1;
+    await dependencies.onAttempt?.(participant, requestId, attempt);
     await dependencies.sendRoleAssignment(participant, labelKey, requestId);
     dependencies.checkAborted(workflowId);
     try {
