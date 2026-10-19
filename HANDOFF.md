@@ -2,6 +2,8 @@
 
 更新日期：2026-10-19。本 workspace 是 Chrome Side Panel extension，程式版本為 **0.3.0**。本次已同步 master、核對交接資料與封存改動；現有備份沒有需要直接套回這個 repo 的 patch。
 
+後續已完成 [2026-10-19 issues、PR 與 webchat 測試](store/WEBCHAT-QC-2026-10-19.zh-TW.md)：優先處理 issue 76，PR 71 有瀏覽器檢查失敗；四個依賴 PR 的組合候選通過，Gemini 訪客收發通過。其他 provider 的限制與實測範圍見報告。
+
 ## 目前程式基準
 
 | 項目 | 整理結果 |
@@ -69,4 +71,4 @@
 
 本次檢查了同步前後 Git 狀態、提交祖先關係、四份 tgz 的可讀性、兩份 session JSONL 的格式，以及 package／manifest 的 0.3.0 版號一致性。所有原始備份保留；沒有套用 patch 或重新啟動舊工作流。
 
-本次整理以文件與備份盤點為範圍，沒有重新執行完整 `npm run verify` 或登入後 Meta 測試。這個 checkout 尚無 `node_modules`；下次修改程式前可執行 `npm ci`，再依變更執行 `npm run verify`。新功能、發布或補做實機驗證依下一項任務處理。
+遷移盤點本身未執行完整程式驗證。後續維護任務已安裝依賴並完成 master、PR 71 與依賴組合的 `npm run verify`，另做 Chromium 與公開頁面測試；完整結果與限制見上方測試報告。登入後 Meta 驗證仍待補齊。
