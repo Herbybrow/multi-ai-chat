@@ -2,10 +2,13 @@ interface ClosestCapableElement {
   id: string;
   closest(selectors: string): unknown;
   getAttribute(name: string): string | null;
+  matches?(selectors: string): boolean;
+  ownerDocument?: Document;
 }
 
 interface QueryCapableContainer {
   querySelector(selectors: string): unknown;
+  querySelectorAll?(selectors: string): NodeListOf<Element>;
 }
 
 interface ChatGptComposerElement extends ClosestCapableElement {
@@ -51,6 +54,12 @@ export const CHATGPT_USER_MESSAGE_SELECTORS = [
 ];
 
 const EXPLICIT_COMPOSER_SELECTOR = '[data-testid*="composer"], form[data-type="unified-composer"], form[data-chatgpt-composer]';
+const NON_COMPOSER_SELECTOR = [
+  '[data-message-author-role]', '[data-testid^="conversation-turn-"]', 'article',
+  'dialog', '[role="dialog"]', '[role="search"]', 'nav', 'aside',
+  '[inert]', '[disabled]', '[readonly]', '[aria-disabled="true"]',
+  '[aria-readonly="true"]', '[aria-hidden="true"]',
+].join(', ');
 const COMPOSER_ACTION_SELECTOR = [
   '[data-testid="send-button"]',
   '#composer-submit-button',
@@ -62,7 +71,26 @@ const COMPOSER_ACTION_SELECTOR = [
 function isWithinChatGptComposer(element: ClosestCapableElement): boolean {
   if (element.closest(EXPLICIT_COMPOSER_SELECTOR)) return true;
   const form = element.closest('form') as QueryCapableContainer | null;
-  return Boolean(form?.querySelector(COMPOSER_ACTION_SELECTOR));
+  return Boolean(form?.querySelector(COMPOSER_ACTION_SELECTOR))
+    || Array.from(form?.querySelectorAll?.('.ProseMirror[contenteditable="true"]') ?? [])
+      .some(isUnmarkedChatGptComposer);
+}
+
+function isUnmarkedChatGptComposer(element: ClosestCapableElement): boolean {
+  const doc = element.ownerDocument;
+  if (!doc?.defaultView
+    || !element.matches?.('.ProseMirror[contenteditable="true"]')
+    || !element.closest('form') || element.closest(NON_COMPOSER_SELECTOR)) return false;
+
+  // Empty composers can omit both the old markers and the Send button. Accept
+  // only the sole visible editor outside message edits, dialogs and navigation.
+  // A second candidate (including a marked composer) makes this fallback unsafe.
+  const candidates = Array.from(doc.querySelectorAll(CHATGPT_INPUT_SELECTORS.join(', '))).filter(candidate => {
+    if (candidate.closest(NON_COMPOSER_SELECTOR)) return false;
+    const style = doc.defaultView!.getComputedStyle(candidate);
+    return style.display !== 'none' && style.visibility !== 'hidden' && candidate.getClientRects().length > 0;
+  });
+  return candidates.length === 1 && candidates[0] === element;
 }
 
 export function isChatGptComposerInput(element: ClosestCapableElement): boolean {

@@ -367,7 +367,8 @@ test('workflow controls retain every trace entry in one reachable scroll contain
   assert.match(source, /const \[traceOpen, setTraceOpen\] = useState\(false\)/);
   assert.match(source, /open=\{isProcessing \|\| traceOpen\}/);
   assert.match(source, /onToggle=\{\(event\) => setTraceOpen\(event\.currentTarget\.open\)\}/);
-  assert.match(source, /max-h-\[46vh\] flex-none overflow-y-auto overscroll-contain/);
+  // Actual Send/Stop visibility and trace reachability are checked in Chromium.
+  assert.match(source, /max-h-\[46vh\][^"\n]*overflow-y-auto overscroll-contain/);
   assert.doesNotMatch(source, /trace\.slice\(/);
   assert.doesNotMatch(source, /max-h-56[^\n]*overflow-y-auto[^\n]*\{trace\.map/);
   assert.match(source, /onClick=\{startNewConversation\}[^>]*>\{t\('app\.new'\)\}/);

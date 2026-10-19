@@ -543,12 +543,24 @@ async function run(browser) {
       assert.equal(await settings().locator('#standby-provider').isDisabled(), true);
       await settings().locator('#theme-select').focus();
       await page.keyboard.press('Tab');
+      assert.equal(await focused(settings().locator('#recovery-enabled')), true);
+      assert.equal(await settings().locator('#recovery-policy').isDisabled(), true);
+      await page.keyboard.press('Tab');
       assert.equal(await focused(settings().locator('#hackmd-token')), true, `${language}: Tab must skip the disabled standby selector`);
       await page.keyboard.press('Escape');
       await expectSettingsClosed();
       assert.equal(await button('targets.select_ready').isDisabled(), true);
       assert.equal(await modeGroup().getByRole('button', { disabled: true }).count(), 5);
       await expectMode('free');
+      await page.evaluate(() => {
+        for (let index = 0; index < 40; index++) window.readinessFixture.emit({
+          action: 'WORKFLOW_DIAGNOSTIC', provider: 'chatgpt', payload: {
+            ...window.readinessFixture.scope, workflowId: 'readiness-fixture-workflow',
+            provider: 'chatgpt', stage: `trace-fixture-${index}`,
+          },
+        });
+      });
+      await page.getByText(/ChatGPT · trace-fixture-39$/).waitFor();
       for (const viewport of [{ width: 320, height: 480 }, { width: 420, height: 600 }]) {
         await page.setViewportSize(viewport);
         const bounds = await button('input.stop').boundingBox();
@@ -556,7 +568,17 @@ async function run(browser) {
           `${language}: Stop with multiline draft must fit ${viewport.width}x${viewport.height}`);
         assert.equal(await button('input.stop').isEnabled(), true);
         assert.equal(await page.locator('textarea').inputValue(), draft);
+        const lastTrace = page.getByText(/ChatGPT · trace-fixture-39$/);
+        await lastTrace.scrollIntoViewIfNeeded();
+        const traceBounds = await lastTrace.boundingBox();
+        const controls = await page.locator('section').first().boundingBox();
+        assert.ok(traceBounds && controls && traceBounds.y >= controls.y
+          && traceBounds.y + traceBounds.height <= controls.y + controls.height,
+        `${language}: final trace entry must remain reachable in the controls scroll area`);
+        const stopBounds = await button('input.stop').boundingBox();
+        assert.ok(stopBounds && stopBounds.y >= 0 && stopBounds.y + stopBounds.height <= viewport.height);
       }
+      assert.equal(await page.getByText(/ChatGPT · trace-fixture-\d+$/).count(), 40);
       passed.push('Stop remains visible and enabled during a workflow with a multiline draft at 320x480 and 420x600');
       await page.setViewportSize({ width: 420, height: 850 });
       await page.evaluate(() => window.readinessFixture.workflow(true));

@@ -869,7 +869,7 @@ export default function App() {
         </div>
       </header>
 
-      <section className="min-h-0 max-h-[46vh] flex-none overflow-y-auto overscroll-contain border-b border-slate-200 bg-white px-3 py-3">
+      <section className="min-h-0 max-h-[46vh] shrink overflow-y-auto overscroll-contain border-b border-slate-200 bg-white px-3 py-3">
         <ModeSelector mode={mode} onModeChange={changeMode} disabled={isProcessing} />
 
         {mode === 'free' && (

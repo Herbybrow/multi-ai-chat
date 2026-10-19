@@ -12,7 +12,8 @@ const scenarios = [
   { name: 'significant whitespace draft', draft: prompt.replace('a  b', 'a b'), error: 'error.existing_draft' },
   { name: 'whitespace-only draft preserved', draft: ' \n\t', error: 'error.input_injection_failed' },
   { name: 'rejected native edit', ignored: true, error: 'error.input_injection_failed' },
-  { name: 'late editor rollback', rollback: true, error: 'error.existing_draft' },
+  { name: 'editor rollback before insertion settles', rollback: 'before-settlement', error: 'error.input_injection_failed' },
+  { name: 'editor rollback after accepted activation', rollback: 'after-activation', success: true },
   { name: 'disabled send', disabled: true, error: 'error.send_action_disabled' },
   { name: 'remounted composer after activation', remount: true, error: 'error.send_unconfirmed' },
   { name: 'draft clearing without response', clearOnly: true, error: 'error.send_unconfirmed' },
@@ -57,7 +58,11 @@ function installFixture(options) {
       commit('');
       setTimeout(() => commit(value), options.delay);
     }
-    if (options.rollback) setTimeout(() => commit('Reconciled old editor state'), 80);
+    // Order this before the injector's next task, independent of machine speed.
+    if (options.rollback === 'before-settlement') queueMicrotask(() => {
+      commit('Reconciled old editor state');
+      window.fixture.rollbackClicks = window.fixture.clicks;
+    });
     return result;
   };
   editor.addEventListener('input', event => {
@@ -77,6 +82,10 @@ function installFixture(options) {
       const replacement = editor.cloneNode(false); replacement.innerHTML = '<p><br></p>'; editor.replaceWith(replacement); return;
     }
     commit('');
+    if (options.rollback === 'after-activation') {
+      commit('Reconciled old editor state');
+      window.fixture.rollbackClicks = window.fixture.clicks;
+    }
     if (options.clearOnly) return;
     const response = document.createElement('div'); response.className = 'model-response-text';
     response.innerHTML = '<div class="markdown"><p>Synthetic English response.</p><button>Copy</button></div>';
@@ -116,6 +125,10 @@ function installFixture(options) {
         assert.equal(state.unrelated, 'Keep me');
         assert.ok(state.clicks <= 1, `${scenario.name}: must never repeat activation`);
         assert.ok(state.edits.length <= 1, `${scenario.name}: must never repeat insertion`);
+        if (scenario.rollback) {
+          assert.equal(state.draft, 'Reconciled old editor state');
+          assert.equal(state.rollbackClicks, scenario.success ? 1 : 0, scenario.name);
+        }
         if (scenario.success) {
           assert.equal(ack.ok, true, `${scenario.name}: ${state.messages[0]?.payload || 'no acknowledgement'}`);
           assert.equal(state.clicks, 1, `${scenario.name}: ${state.messages[0]?.payload || 'no response'}`);
