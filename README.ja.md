@@ -2,25 +2,24 @@
 
 [English](./README.md) · [繁體中文](./README.zh-TW.md) · **日本語** · [Deutsch](./README.de.md) · [한국어](./README.ko.md)
 
-[Chrome ウェブストアからインストール](https://chromewebstore.google.com/detail/multi-ai-chat/nomhpmmhkmolkmpkjfeainjoifkipdah) · [公式サイト](https://ted-h-com.github.io/multi-ai-chat/?lang=ja) · [v0.3.0 リリース](https://github.com/TED-H-com/multi-ai-chat/releases/tag/v0.3.0) · [デスクトップ版](https://ted-h-com.github.io/multi-ai-chat-desktop/?lang=ja)
+[Chrome ウェブストアからインストール](https://chromewebstore.google.com/detail/multi-ai-chat/nomhpmmhkmolkmpkjfeainjoifkipdah) · [公式サイト](https://ted-h-com.github.io/multi-ai-chat/?lang=ja) · [v0.4.0 リリース](https://github.com/TED-H-com/multi-ai-chat/releases/tag/v0.4.0) · [デスクトップ版](https://ted-h-com.github.io/multi-ai-chat-desktop/?lang=ja)
 
 質問は一度だけ。4つのAIをまとめて動かせます。Multi-AI Chat は、ログイン済みの **ChatGPT、Claude、Gemini、Grok** タブを連携させる軽量な Chrome Side Panel です。普段アクセスしている provider ページをそのまま利用するため、モデルAPIキーも独自のチャットbackendも必要ありません。
 
-**最新リリース：v0.3.0** · Chrome 114+ · Manifest V3 · 5言語UI · MIT
+**最新リリース：v0.4.0** · Chrome 114+ · Manifest V3 · 5言語UI · MIT
 
-**v0.3.0 には、初期状態ではオフの実験的な Meta AI 待機オプションがあります。** 初期状態では従来の4つが有効です。「**設定 → 待機中の AI**」でそのうち1つを選ぶと Meta AI が代わりに有効になり、同時に有効な AI は常に4つです。Meta を有効にすると meta.ai へのアクセスを求め、拒否した場合は Meta が待機のままになります。送信先と役割は自動調整され、再起動後も選択が保持されます。既存のタブやログインは削除しません。ゲスト利用は Meta の現在のサイトや地域によります。無効な入力欄は準備完了と判定しません。
+**v0.4.0 には、初期状態ではオフの実験的な Meta AI 待機オプションがあります。** 初期状態では従来の4つが有効です。「**設定 → 待機中の AI**」でそのうち1つを選ぶと Meta AI が代わりに有効になり、同時に有効な AI は常に4つです。Meta を有効にすると meta.ai へのアクセスを求め、拒否した場合は Meta が待機のままになります。送信先と役割は自動調整され、再起動後も選択が保持されます。既存のタブやログインは削除しません。ゲスト利用は Meta の現在のサイトや地域によります。無効な入力欄は準備完了と判定しません。
 
 > Multi-AI Chat は第三者のWeb UIを自動操作します。Provider 側のデザイン変更によってページ selector が一時的に動作しなくなることがあります。また、自動化は各サービスの利用規約の対象となる場合があります。利用権限のあるアカウントとコンテンツのみを使用してください。
 
 ![Chrome で複数 provider の workflow を実行する Multi-AI Chat](./store/screenshot-1280x800.png)
 
-## v0.3.0 の変更点
+## v0.4.0 の変更点
 
-- **実験的な Meta AI 待機オプション。初期状態ではオフです。** 従来の4つは有効なままです。「**設定 → 待機中の AI**」でそのうち1つを Meta AI に置き換えられ、同時に有効な AI は常に4つです。`https://www.meta.ai/*` と `https://meta.ai/*` へのアクセスは、利用者が Meta を有効にしたときだけ求めます。拒否すると Meta は待機のままです。meta.ai はインストール時の必須ホスト権限ではないため、更新で既存の利用者に拡張機能の再承認を求めません。許可のあとで `content/meta.js` を動的に登録します。静的な Meta content script はありません。
-- **Meta の準備完了判定を厳しくしました。** ログイン用の操作がページに残っていても、使える入力欄は準備完了です。操作できない入力欄や、明示的なログイン画面は、ログインが必要であることを意味します。`data-disabled="true"` の入力欄や操作、`opacity: 0` で描かれているものは準備完了にしません。
-- **Workflow、設定、入力。** 直前の要求から遅れて届いた結果、provider の URL、送信失敗は、新しいチャットに入りません。会話の保存は最新のスナップショットを書き、読み取りに失敗したときは履歴を消さずに再試行し、壊れた行は読み飛ばします。準備ができていない provider は、Workflow や一部だけの自由送信の前に名前を示します。準備状態のヒントから、選択済みで未準備の provider を開けます。自由送信では、準備完了かつ有効な provider だけを選べます。パネルを閉じても自由送信の選択は残ります。IME の確定では下書きを送信しません。モード選択を表示し、キーボードフォーカスを見えるようにし、設定ダイアログのフォーカスは Escape か閉じるまでダイアログ内に保ちます。高さが足りないパネルでも送信とその他の入力操作を表示し、プロンプトには安定した翻訳済みラベルを付けます。設定ダイアログを閉じたあとに終わった Token の読み込みや保存は無視します。失敗した読み込みや保存は画面に残り、やり直すことができます。
-- **5つのインターフェース言語。** 待機、Meta の権限拒否、準備状態、設定、入力の文言を、English、繁體中文、日本語、Deutsch、한국어で用意しています。
-- **既知の制限。** Meta AI は実験的機能で、初期状態ではオフです。ログインした状態での送信と受信は、実際にログインしたページではまだ操作されていません。権限の確認、content script の動的登録、ブラウザ再起動後の保持は、ブラウザ上の実行ではなくユニットテストの範囲です。Meta がうまく動かないときは [issue を開いて](https://github.com/TED-H-com/multi-ai-chat/issues)ください。確認項目は[チェックリスト](./store/META-AI-SMOKE.md)にあります。他の4つには影響しません。
+- **再起動後の復旧。** ワークフローのチェックポイントに完了した手順と復旧待ちの選択を保存します。自動復旧は初期状態ではオフです。送信済み、または送信状態が不明な要求を自動で再送しません。
+- **言語とサイト互換性。** 回答言語を UI 言語と分けて扱います。ChatGPT の入力欄検出、Gemini のプレーンテキスト入力、Grok のログイン要求の検出を改善し、既存の下書きを保護します。
+- **パネルと保守。** 低いウィンドウでも Send／Stop を表示し、長い処理記録をスクロールできます。React、Tailwind、TypeScript とビルド依存関係を更新しました。
+- **検証と制限。** 450 件のテストと Chromium の fixture 検査 131 件が成功し、Gemini のゲスト送受信も実機で確認しました。ログイン後の 5 サイト全体のワークフロー、Stop、長文回答のエンドツーエンド検証は未実施です。Meta AI は実験的機能のまま、初期状態ではオフです。[詳細なリリースノート](./store/RELEASE-v0.4.0.md)を参照してください。
 
 ## エディションを選ぶ
 
@@ -64,17 +63,17 @@ Chrome ウェブストアの掲載は **v0.3.0**（2026-09-23 更新）で、実
 
 GitHub Release の ZIP は手動インストール用のバックアップです。unpacked extension として直接読み込めるため、ソースの build は不要です。
 
-> v0.3.0 は現在のリリースです。以下の ZIP と checksum は、その GitHub Release に添付された正式なファイルで、Chrome ウェブストアに掲載されている同じ v0.3.0 を手動インストールするためのものです。
+> v0.4.0 は GitHub で公開済みです。以下の ZIP と checksum が正式なリリースファイルです。Chrome ウェブストアへの公開は、別途の提出と審査に従います。
 
-1. [`multi-ai-chat-store-v0.3.0.zip`](https://github.com/TED-H-com/multi-ai-chat/releases/download/v0.3.0/multi-ai-chat-store-v0.3.0.zip) と [checksum ファイル](https://github.com/TED-H-com/multi-ai-chat/releases/download/v0.3.0/multi-ai-chat-store-v0.3.0.zip.sha256)をダウンロードします。
-2. アーカイブを検証します。正しい SHA-256 は `d7e976872d2e19cf8867ea7562c263d7de31f175e706ea44b67a204db3233d80` です。
+1. [`multi-ai-chat-store-v0.4.0.zip`](https://github.com/TED-H-com/multi-ai-chat/releases/download/v0.4.0/multi-ai-chat-store-v0.4.0.zip) と [checksum ファイル](https://github.com/TED-H-com/multi-ai-chat/releases/download/v0.4.0/multi-ai-chat-store-v0.4.0.zip.sha256)をダウンロードします。
+2. アーカイブを検証します。正しい SHA-256 は `a128a939f9dd14606af6b8bb6c058377236664cd6ff537db4dbe6f999a145577` です。
 
    ```powershell
-   (Get-FileHash .\multi-ai-chat-store-v0.3.0.zip -Algorithm SHA256).Hash.ToLower()
+   (Get-FileHash .\multi-ai-chat-store-v0.4.0.zip -Algorithm SHA256).Hash.ToLower()
    ```
 
    ```sh
-   shasum -a 256 multi-ai-chat-store-v0.3.0.zip
+   shasum -a 256 multi-ai-chat-store-v0.4.0.zip
    ```
 
 3. ZIP を常設フォルダーへ展開します。その直下に `manifest.json` があります。

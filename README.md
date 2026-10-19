@@ -2,25 +2,24 @@
 
 **English** · [繁體中文](./README.zh-TW.md) · [日本語](./README.ja.md) · [Deutsch](./README.de.md) · [한국어](./README.ko.md)
 
-[Install from the Chrome Web Store](https://chromewebstore.google.com/detail/multi-ai-chat/nomhpmmhkmolkmpkjfeainjoifkipdah) · [Official website](https://ted-h-com.github.io/multi-ai-chat/) · [v0.3.0 release](https://github.com/TED-H-com/multi-ai-chat/releases/tag/v0.3.0) · [Desktop edition](https://ted-h-com.github.io/multi-ai-chat-desktop/)
+[Install from the Chrome Web Store](https://chromewebstore.google.com/detail/multi-ai-chat/nomhpmmhkmolkmpkjfeainjoifkipdah) · [Official website](https://ted-h-com.github.io/multi-ai-chat/) · [v0.4.0 release](https://github.com/TED-H-com/multi-ai-chat/releases/tag/v0.4.0) · [Desktop edition](https://ted-h-com.github.io/multi-ai-chat-desktop/)
 
 Ask once and put four AIs to work. Multi-AI Chat is a lightweight Chrome Side Panel that coordinates your signed-in **ChatGPT, Claude, Gemini, and Grok** tabs. It uses the provider pages you already have access to. There are no model API keys and no separate chat backend.
 
-**Current release: v0.3.0** · Chrome 114+ · Manifest V3 · Five interface languages · MIT
+**Current release: v0.4.0** · Chrome 114+ · Manifest V3 · Five interface languages · MIT
 
-**v0.3.0 includes experimental Meta AI as a standby provider that stays off by default.** The original four remain active by default. In **Settings → Standby provider**, choose one of them to activate Meta AI in its place; exactly four providers stay active. Activating Meta asks for access to meta.ai, and declining keeps Meta on standby. Targets and workflow roles follow the selection, which persists across restarts. Existing tabs and sign-ins are preserved. Meta guest access depends on the current site/region, and an inert or disabled composer is not treated as ready.
+**v0.4.0 includes experimental Meta AI as a standby provider that stays off by default.** The original four remain active by default. In **Settings → Standby provider**, choose one of them to activate Meta AI in its place; exactly four providers stay active. Activating Meta asks for access to meta.ai, and declining keeps Meta on standby. Targets and workflow roles follow the selection, which persists across restarts. Existing tabs and sign-ins are preserved. Meta guest access depends on the current site/region, and an inert or disabled composer is not treated as ready.
 
 > Multi-AI Chat automates third-party web interfaces. A provider redesign can temporarily break page selectors, and automated use may be governed by each provider's terms. Use only accounts and content you are authorized to use.
 
 ![Multi-AI Chat running a multi-provider workflow in Chrome](./store/screenshot-1280x800.png)
 
-## What changed in v0.3.0
+## What changed in v0.4.0
 
-- **Experimental Meta AI standby, off by default.** The original four remain active. In **Settings → Standby provider**, one of them can be replaced by Meta AI, and exactly four providers stay active. Access to `https://www.meta.ai/*` and `https://meta.ai/*` is requested only when the user activates Meta. Declining leaves Meta on standby. meta.ai is not a required host permission, so an update does not force existing users to re-approve the extension. `content/meta.js` is registered dynamically after that access is granted. There is no static Meta content script.
-- **Stricter Meta readiness.** A usable composer counts as ready even when leftover login controls are still on the page. An inert composer or an explicit login wall still means sign-in. A composer or control gated by `data-disabled="true"` or drawn at `opacity: 0` is not treated as ready.
-- **Workflow, Settings, and input.** A late result, provider URL, or send failure from the previous request stays out of a new chat. Conversation storage writes the latest snapshot, retries a failed read instead of wiping history, and skips malformed rows. Providers that are not ready are named before a workflow or a partial Free send. The readiness hint opens the selected unready providers, and Free mode can select only the ready active providers. Free mode stays selected when the panel closes. IME confirmation does not send a draft. Mode selection is exposed, keyboard focus is visible, and Settings focus stays inside the dialog until Escape or close. Send and the other input actions stay visible in a short panel, and the prompt has a stable localized label. A Settings token load or save that finishes after that dialog has closed is ignored. A failed load or save stays on screen and can be tried again.
-- **Five interface languages.** Standby, Meta permission denial, readiness, Settings, and input copy are covered in English, Traditional Chinese, Japanese, German, and Korean.
-- **Known limit.** Meta AI is experimental and off by default. Authenticated send and receive has not been exercised on a real signed-in page. The permission prompt, the dynamic content-script registration, and browser-restart persistence have unit-test coverage rather than a browser run. If Meta misbehaves, [open an issue](https://github.com/TED-H-com/multi-ai-chat/issues). The [checklist](./store/META-AI-SMOKE.md) is the reference for that report. The other four providers are unaffected.
+- **Recovery across restarts.** Workflow checkpoints preserve completed turns and pending recovery decisions. Optional automatic recovery stays off by default; accepted or uncertain sends are never automatically repeated.
+- **Language and provider compatibility.** Answer language follows the task independently of the interface language. ChatGPT composer detection, Gemini plain-text insertion, and Grok sign-in detection are improved without overwriting an existing draft.
+- **Panel and maintenance.** Send and Stop stay visible in short windows, long workflow traces remain scrollable, and React, Tailwind, TypeScript, and build dependencies are updated.
+- **Validation and limits.** 450 tests and 131 Chromium fixture checks passed; real Gemini guest send and receive passed. Authenticated five-provider workflows, Stop, and long responses remain unverified end to end. Meta AI remains experimental and off by default. See the [full release notes](./store/RELEASE-v0.4.0.md).
 
 ## Choose your edition
 
@@ -70,17 +69,17 @@ The Chrome Web Store listing is **v0.3.0** (updated 2026-09-23) and includes exp
 
 The GitHub Release ZIP is a manual backup that can be loaded as an unpacked extension; no source build is required.
 
-> v0.3.0 is the current release. The ZIP and checksum below are the official files attached to its GitHub Release, for manual installation of the same release the Chrome Web Store lists.
+> v0.4.0 is available on GitHub. The ZIP and checksum below are its official release files. Chrome Web Store availability follows its separate submission and review process.
 
-1. Download [`multi-ai-chat-store-v0.3.0.zip`](https://github.com/TED-H-com/multi-ai-chat/releases/download/v0.3.0/multi-ai-chat-store-v0.3.0.zip) and its [checksum file](https://github.com/TED-H-com/multi-ai-chat/releases/download/v0.3.0/multi-ai-chat-store-v0.3.0.zip.sha256).
-2. Verify the archive. The expected SHA-256 is `d7e976872d2e19cf8867ea7562c263d7de31f175e706ea44b67a204db3233d80`.
+1. Download [`multi-ai-chat-store-v0.4.0.zip`](https://github.com/TED-H-com/multi-ai-chat/releases/download/v0.4.0/multi-ai-chat-store-v0.4.0.zip) and its [checksum file](https://github.com/TED-H-com/multi-ai-chat/releases/download/v0.4.0/multi-ai-chat-store-v0.4.0.zip.sha256).
+2. Verify the archive. The expected SHA-256 is `a128a939f9dd14606af6b8bb6c058377236664cd6ff537db4dbe6f999a145577`.
 
    ```powershell
-   (Get-FileHash .\multi-ai-chat-store-v0.3.0.zip -Algorithm SHA256).Hash.ToLower()
+   (Get-FileHash .\multi-ai-chat-store-v0.4.0.zip -Algorithm SHA256).Hash.ToLower()
    ```
 
    ```sh
-   shasum -a 256 multi-ai-chat-store-v0.3.0.zip
+   shasum -a 256 multi-ai-chat-store-v0.4.0.zip
    ```
 
 3. Extract the ZIP to a permanent folder. Its root contains `manifest.json`.
