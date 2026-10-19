@@ -2,7 +2,7 @@
 
 [English](./README.md) · [繁體中文](./README.zh-TW.md) · [日本語](./README.ja.md) · [Deutsch](./README.de.md) · **한국어**
 
-[Chrome 웹 스토어에서 설치](https://chromewebstore.google.com/detail/multi-ai-chat/nomhpmmhkmolkmpkjfeainjoifkipdah) · [공식 웹사이트](https://teddashh.github.io/multi-ai-chat/?lang=ko) · [v0.3.0 릴리스](https://github.com/teddashh/multi-ai-chat/releases/tag/v0.3.0) · [데스크톱 버전](https://teddashh.github.io/multi-ai-chat-desktop/)
+[Chrome 웹 스토어에서 설치](https://chromewebstore.google.com/detail/multi-ai-chat/nomhpmmhkmolkmpkjfeainjoifkipdah) · [공식 웹사이트](https://ted-h-com.github.io/multi-ai-chat/?lang=ko) · [v0.3.0 릴리스](https://github.com/TED-H-com/multi-ai-chat/releases/tag/v0.3.0) · [데스크톱 버전](https://ted-h-com.github.io/multi-ai-chat-desktop/)
 
 한 번 질문하고 네 개의 AI를 함께 활용하세요. Multi-AI Chat은 로그인된 **ChatGPT, Claude, Gemini, Grok** 탭을 조율하는 가벼운 Chrome Side Panel입니다. 이미 이용 권한이 있는 provider 페이지를 그대로 사용하므로 모델 API 키나 별도의 채팅 backend가 필요하지 않습니다.
 
@@ -20,14 +20,14 @@
 - **더 엄격한 Meta 준비 판정.** 로그인 컨트롤이 페이지에 남아 있어도 사용할 수 있는 입력란은 준비됨입니다. 비활성 입력란이나 명시적인 로그인 화면은 여전히 로그인이 필요하다는 뜻입니다. `data-disabled="true"`이거나 `opacity: 0`으로 그려진 입력란이나 컨트롤은 준비됨으로 보지 않습니다.
 - **workflow, 설정, 입력.** 이전 요청의 늦은 결과, provider URL, 전송 실패는 새 대화에 들어가지 않습니다. 대화 저장소는 최신 스냅샷을 기록하고, 읽기에 실패하면 기록을 지우지 않고 다시 시도하며, 형식이 잘못된 행은 건너뜁니다. 준비되지 않은 provider는 workflow나 일부만 보내는 자유 전송 전에 이름을 표시합니다. 준비 상태 안내에서 선택되었지만 준비되지 않은 provider를 열 수 있고, 자유 전송에서는 준비된 활성 provider만 선택할 수 있습니다. 패널을 닫아도 자유 전송 선택은 유지됩니다. IME 확정으로는 초안을 보내지 않습니다. 모드 선택을 표시하고, 키보드 포커스를 보이게 하며, 설정 대화 상자의 포커스는 Escape나 닫기까지 대화 상자 안에 남습니다. 높이가 낮은 패널에서도 전송과 다른 입력 동작이 보이고, 프롬프트에는 안정적인 지역화 레이블이 있습니다. 설정 대화 상자가 닫힌 뒤에 끝난 Token 불러오기나 저장은 무시합니다. 실패한 불러오기나 저장은 화면에 남고 다시 시도할 수 있습니다.
 - **다섯 가지 인터페이스 언어.** 대기, Meta 권한 거부, 준비 상태, 설정, 입력 문구를 English, 繁體中文, 日本語, Deutsch, 한국어로 제공합니다.
-- **알려진 한계.** Meta AI는 실험 기능이며 기본값은 꺼짐입니다. 로그인한 상태의 전송과 수신은 실제로 로그인한 페이지에서 실행된 적이 없습니다. 권한 요청, content script의 동적 등록, 브라우저를 다시 시작한 뒤의 유지는 브라우저에서 실행한 기록이 아니라 단위 테스트 범위입니다. Meta가 예상대로 동작하지 않으면 [이슈를 열어](https://github.com/teddashh/multi-ai-chat/issues) 주세요. 그때 볼 항목은 [체크리스트](./store/META-AI-SMOKE.md)에 있습니다. 나머지 네 제공자는 영향을 받지 않습니다.
+- **알려진 한계.** Meta AI는 실험 기능이며 기본값은 꺼짐입니다. 로그인한 상태의 전송과 수신은 실제로 로그인한 페이지에서 실행된 적이 없습니다. 권한 요청, content script의 동적 등록, 브라우저를 다시 시작한 뒤의 유지는 브라우저에서 실행한 기록이 아니라 단위 테스트 범위입니다. Meta가 예상대로 동작하지 않으면 [이슈를 열어](https://github.com/TED-H-com/multi-ai-chat/issues) 주세요. 그때 볼 항목은 [체크리스트](./store/META-AI-SMOKE.md)에 있습니다. 나머지 네 제공자는 영향을 받지 않습니다.
 
 ## 버전 선택
 
 | 버전 | 적합한 용도 |
 |---|---|
 | **브라우저 확장 프로그램(이 repository)** | 평소 사용하는 provider 탭을 작은 Chrome Side Panel에서 제어할 때 |
-| [Multi-AI Chat Desktop](https://teddashh.github.io/multi-ai-chat-desktop/) | 분리된 provider profile, 집중형 live WebView, snapshot, replay, checkpoint, 로컬 파일 workflow가 필요할 때 |
+| [Multi-AI Chat Desktop](https://ted-h-com.github.io/multi-ai-chat-desktop/) | 분리된 provider profile, 집중형 live WebView, snapshot, replay, checkpoint, 로컬 파일 workflow가 필요할 때 |
 
 두 버전 모두 provider의 웹 session을 사용하며 모델 API 키가 필요하지 않습니다.
 
@@ -66,7 +66,7 @@ GitHub Release ZIP은 수동 설치용 대안이며 unpacked extension으로 바
 
 > v0.3.0은 현재 릴리스입니다. 아래 ZIP과 checksum은 그 GitHub 릴리스에 첨부된 정식 파일이며, Chrome 웹 스토어에 등록된 같은 v0.3.0을 수동으로 설치할 때 사용합니다.
 
-1. [`multi-ai-chat-store-v0.3.0.zip`](https://github.com/teddashh/multi-ai-chat/releases/download/v0.3.0/multi-ai-chat-store-v0.3.0.zip)과 [checksum 파일](https://github.com/teddashh/multi-ai-chat/releases/download/v0.3.0/multi-ai-chat-store-v0.3.0.zip.sha256)을 다운로드합니다.
+1. [`multi-ai-chat-store-v0.3.0.zip`](https://github.com/TED-H-com/multi-ai-chat/releases/download/v0.3.0/multi-ai-chat-store-v0.3.0.zip)과 [checksum 파일](https://github.com/TED-H-com/multi-ai-chat/releases/download/v0.3.0/multi-ai-chat-store-v0.3.0.zip.sha256)을 다운로드합니다.
 2. 압축 파일을 검증합니다. 올바른 SHA-256은 `d7e976872d2e19cf8867ea7562c263d7de31f175e706ea44b67a204db3233d80`입니다.
 
    ```powershell
@@ -88,7 +88,7 @@ GitHub Release ZIP은 수동 설치용 대안이며 unpacked extension으로 바
 필요 환경: Chrome 114+, Node.js 22.18+, npm, Git.
 
 ```sh
-git clone https://github.com/teddashh/multi-ai-chat.git
+git clone https://github.com/TED-H-com/multi-ai-chat.git
 cd multi-ai-chat
 npm ci
 npm run verify
@@ -143,14 +143,14 @@ npm audit
 - `src/content/*.ts`: provider별 selector와 editor strategy
 - `src/sidepanel/`: React UI, 로컬 session, Markdown, theme, localization
 
-Pull Request를 열기 전에 `npm run verify`를 실행하세요. Provider 페이지가 작동하지 않으면 provider와 브라우저 버전을 적어 [Issue](https://github.com/teddashh/multi-ai-chat/issues)를 열 수 있습니다. 스크린샷이나 log에서는 prompt, 응답, 계정 정보, Token을 제거하세요.
+Pull Request를 열기 전에 `npm run verify`를 실행하세요. Provider 페이지가 작동하지 않으면 provider와 브라우저 버전을 적어 [Issue](https://github.com/TED-H-com/multi-ai-chat/issues)를 열 수 있습니다. 스크린샷이나 log에서는 prompt, 응답, 계정 정보, Token을 제거하세요.
 
 ## 프로젝트와 기여자
 
-- [공식 웹사이트](https://teddashh.github.io/multi-ai-chat/?lang=ko)
-- [GitHub Releases](https://github.com/teddashh/multi-ai-chat/releases)
-- [소스 및 Issue tracker](https://github.com/teddashh/multi-ai-chat)
-- [Multi-AI Chat Desktop](https://teddashh.github.io/multi-ai-chat-desktop/)
+- [공식 웹사이트](https://ted-h-com.github.io/multi-ai-chat/?lang=ko)
+- [GitHub Releases](https://github.com/TED-H-com/multi-ai-chat/releases)
+- [소스 및 Issue tracker](https://github.com/TED-H-com/multi-ai-chat)
+- [Multi-AI Chat Desktop](https://ted-h-com.github.io/multi-ai-chat-desktop/)
 - [MIT License](./LICENSE)
 
 [AI-Sister.com](https://ai-sister.com)의 후원으로 개발되었습니다. 제작자 Ted Huang([TED@TED-H.com](mailto:TED@TED-H.com), [ted-h.com](https://ted-h.com)).

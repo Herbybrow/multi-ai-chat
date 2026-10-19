@@ -2,7 +2,7 @@
 
 [English](./README.md) · [繁體中文](./README.zh-TW.md) · [日本語](./README.ja.md) · **Deutsch** · [한국어](./README.ko.md)
 
-[Im Chrome Web Store installieren](https://chromewebstore.google.com/detail/multi-ai-chat/nomhpmmhkmolkmpkjfeainjoifkipdah) · [Offizielle Website](https://teddashh.github.io/multi-ai-chat/?lang=de) · [Release v0.3.0](https://github.com/teddashh/multi-ai-chat/releases/tag/v0.3.0) · [Desktop-Version](https://teddashh.github.io/multi-ai-chat-desktop/?lang=de)
+[Im Chrome Web Store installieren](https://chromewebstore.google.com/detail/multi-ai-chat/nomhpmmhkmolkmpkjfeainjoifkipdah) · [Offizielle Website](https://ted-h-com.github.io/multi-ai-chat/?lang=de) · [Release v0.3.0](https://github.com/TED-H-com/multi-ai-chat/releases/tag/v0.3.0) · [Desktop-Version](https://ted-h-com.github.io/multi-ai-chat-desktop/?lang=de)
 
 Einmal fragen, vier KIs gemeinsam einsetzen. Multi-AI Chat ist ein leichtes Chrome Side Panel, das deine angemeldeten **ChatGPT-, Claude-, Gemini- und Grok-Tabs** koordiniert. Es verwendet die Provider-Seiten, auf die du bereits Zugriff hast, ohne Modell-API-Schlüssel und ohne separaten Chat-Server.
 
@@ -20,14 +20,14 @@ Einmal fragen, vier KIs gemeinsam einsetzen. Multi-AI Chat ist ein leichtes Chro
 - **Strengere Meta-Bereitschaft.** Ein benutzbares Eingabefeld gilt als bereit, auch wenn noch Anmelde-Steuerelemente auf der Seite stehen. Ein inertes Eingabefeld oder eine ausdrückliche Anmeldeseite bedeutet weiterhin Anmeldung. Ein Eingabefeld oder Steuerelement mit `data-disabled="true"` oder mit `opacity: 0` gilt nicht als bereit.
 - **Workflow, Einstellungen und Eingabe.** Ein verspätetes Ergebnis, eine Provider-URL oder ein Sendefehler aus der vorherigen Anfrage gelangt nicht in einen neuen Chat. Der Gesprächsspeicher schreibt den letzten Snapshot, wiederholt ein fehlgeschlagenes Lesen, statt den Verlauf zu löschen, und überspringt ungültige Zeilen. Nicht bereite Anbieter werden vor einem Workflow oder einem teilweisen freien Senden benannt. Der Bereitschaftshinweis öffnet die ausgewählten, noch nicht bereiten Anbieter, und der freie Modus kann nur die bereiten aktiven Anbieter auswählen. Der freie Modus bleibt ausgewählt, wenn das Panel geschlossen wird. Eine IME-Bestätigung sendet keinen Entwurf. Die Modusauswahl ist sichtbar, der Tastaturfokus wird angezeigt, und der Fokus der Einstellungen bleibt bis Escape oder Schließen im Dialog. Senden und die übrigen Eingabeaktionen bleiben in einem niedrigen Panel sichtbar, und die Eingabeaufforderung hat eine stabile lokalisierte Bezeichnung. Ein Laden oder Speichern des Tokens, das nach dem Schließen dieses Dialogs endet, wird ignoriert. Ein fehlgeschlagenes Laden oder Speichern bleibt sichtbar und kann erneut versucht werden.
 - **Fünf Oberflächensprachen.** Texte zum inaktiven Anbieter, zur abgelehnten Meta-Berechtigung, zur Bereitschaft, zu Einstellungen und zur Eingabe gibt es auf Englisch, traditionellem Chinesisch, Japanisch, Deutsch und Koreanisch.
-- **Bekannte Einschränkung.** Meta AI ist experimentell und standardmäßig aus. Authentifiziertes Senden und Empfangen wurde auf einer wirklich angemeldeten Seite nicht ausgeführt. Die Berechtigungsabfrage, die dynamische Content-Script-Registrierung und das Beibehalten nach einem Browser-Neustart haben eine Unit-Test-Abdeckung und keinen Lauf im Browser. Wenn Meta sich falsch verhält, [öffne ein Issue](https://github.com/teddashh/multi-ai-chat/issues). Die [Checkliste](./store/META-AI-SMOKE.md) ist die Referenz für diesen Bericht. Die anderen vier Anbieter sind nicht betroffen.
+- **Bekannte Einschränkung.** Meta AI ist experimentell und standardmäßig aus. Authentifiziertes Senden und Empfangen wurde auf einer wirklich angemeldeten Seite nicht ausgeführt. Die Berechtigungsabfrage, die dynamische Content-Script-Registrierung und das Beibehalten nach einem Browser-Neustart haben eine Unit-Test-Abdeckung und keinen Lauf im Browser. Wenn Meta sich falsch verhält, [öffne ein Issue](https://github.com/TED-H-com/multi-ai-chat/issues). Die [Checkliste](./store/META-AI-SMOKE.md) ist die Referenz für diesen Bericht. Die anderen vier Anbieter sind nicht betroffen.
 
 ## Die passende Version wählen
 
 | Version | Geeignet für |
 |---|---|
 | **Browser-Erweiterung (dieses Repository)** | Ein kleines Chrome Side Panel für die Provider-Tabs, die du ohnehin verwendest |
-| [Multi-AI Chat Desktop](https://teddashh.github.io/multi-ai-chat-desktop/?lang=de) | Getrennte Provider-Profile, fokussierte Live-WebViews, Snapshots, Replay, Checkpoints und Workflows mit lokalen Dateien |
+| [Multi-AI Chat Desktop](https://ted-h-com.github.io/multi-ai-chat-desktop/?lang=de) | Getrennte Provider-Profile, fokussierte Live-WebViews, Snapshots, Replay, Checkpoints und Workflows mit lokalen Dateien |
 
 Beide Versionen verwenden die Web-Sitzungen der Provider und benötigen keine Modell-API-Schlüssel.
 
@@ -66,7 +66,7 @@ Die ZIP-Datei aus GitHub Releases dient als manuelle Alternative und kann direkt
 
 > v0.3.0 ist die aktuelle Version. Die folgende ZIP-Datei und Prüfsumme sind die offiziellen Dateien dieses GitHub-Releases und dienen der manuellen Installation derselben Version, die der Chrome Web Store listet.
 
-1. Lade [`multi-ai-chat-store-v0.3.0.zip`](https://github.com/teddashh/multi-ai-chat/releases/download/v0.3.0/multi-ai-chat-store-v0.3.0.zip) und die zugehörige [Prüfsummendatei](https://github.com/teddashh/multi-ai-chat/releases/download/v0.3.0/multi-ai-chat-store-v0.3.0.zip.sha256) herunter.
+1. Lade [`multi-ai-chat-store-v0.3.0.zip`](https://github.com/TED-H-com/multi-ai-chat/releases/download/v0.3.0/multi-ai-chat-store-v0.3.0.zip) und die zugehörige [Prüfsummendatei](https://github.com/TED-H-com/multi-ai-chat/releases/download/v0.3.0/multi-ai-chat-store-v0.3.0.zip.sha256) herunter.
 2. Prüfe das Archiv. Die erwartete SHA-256-Prüfsumme lautet `d7e976872d2e19cf8867ea7562c263d7de31f175e706ea44b67a204db3233d80`.
 
    ```powershell
@@ -88,7 +88,7 @@ Für ein Update entpackst du das neue Release in einen eigenen dauerhaften Ordne
 Voraussetzungen: Chrome 114+, Node.js 22.18+, npm und Git.
 
 ```sh
-git clone https://github.com/teddashh/multi-ai-chat.git
+git clone https://github.com/TED-H-com/multi-ai-chat.git
 cd multi-ai-chat
 npm ci
 npm run verify
@@ -143,14 +143,14 @@ Wichtige Module:
 - `src/content/*.ts`: Provider-spezifische Selektoren und Editor-Strategien
 - `src/sidepanel/`: React-Oberfläche, lokale Sitzungen, Markdown, Themes und Lokalisierung
 
-Führe vor einem Pull Request `npm run verify` aus. Wenn eine Provider-Seite nicht mehr funktioniert, erstelle ein [Issue](https://github.com/teddashh/multi-ai-chat/issues) mit Provider und Browser-Version. Entferne zuvor Prompts, Antworten, Kontodaten und Tokens aus Screenshots oder Logs.
+Führe vor einem Pull Request `npm run verify` aus. Wenn eine Provider-Seite nicht mehr funktioniert, erstelle ein [Issue](https://github.com/TED-H-com/multi-ai-chat/issues) mit Provider und Browser-Version. Entferne zuvor Prompts, Antworten, Kontodaten und Tokens aus Screenshots oder Logs.
 
 ## Projekt und Danksagung
 
-- [Offizielle Website](https://teddashh.github.io/multi-ai-chat/?lang=de)
-- [GitHub Releases](https://github.com/teddashh/multi-ai-chat/releases)
-- [Quellcode und Issue-Tracker](https://github.com/teddashh/multi-ai-chat)
-- [Multi-AI Chat Desktop](https://teddashh.github.io/multi-ai-chat-desktop/?lang=de)
+- [Offizielle Website](https://ted-h-com.github.io/multi-ai-chat/?lang=de)
+- [GitHub Releases](https://github.com/TED-H-com/multi-ai-chat/releases)
+- [Quellcode und Issue-Tracker](https://github.com/TED-H-com/multi-ai-chat)
+- [Multi-AI Chat Desktop](https://ted-h-com.github.io/multi-ai-chat-desktop/?lang=de)
 - [MIT-Lizenz](./LICENSE)
 
 Gesponsert von [AI-Sister.com](https://ai-sister.com). Erstellt von Ted Huang ([TED@TED-H.com](mailto:TED@TED-H.com), [ted-h.com](https://ted-h.com)).
