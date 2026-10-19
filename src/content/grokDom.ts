@@ -24,6 +24,10 @@ export const GROK_INPUT_SELECTORS = [
   '.ProseMirror[contenteditable="true"]',
 ];
 
+// Explicit blocking card observed after a guest submission, not the ordinary
+// sign-up link that is also present while the guest composer is usable.
+export const GROK_LOGGED_OUT_SELECTORS = ['[data-testid="anon-paywall-sign-up-card"]'];
+
 export const GROK_STOP_SELECTORS = [
   'button[data-testid="chat-stop"]',
   'button[data-testid="chat-stop-button"]',

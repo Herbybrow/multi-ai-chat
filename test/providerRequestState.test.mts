@@ -17,5 +17,7 @@ test('submission evidence never promotes a draft or insertion to submitted', () 
 test('only known provider state names enter the durable workflow protocol', () => {
   assert.equal(isProviderRequestState('submission_accepted'), true);
   assert.equal(isProviderRequestState('made_up_state'), false);
+  assert.equal(isProviderRequestState('constructor'), false);
+  assert.equal(isProviderRequestState('__proto__'), false);
   assert.equal(isProviderRequestState({}), false);
 });

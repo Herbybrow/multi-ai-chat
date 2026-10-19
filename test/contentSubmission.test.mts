@@ -20,6 +20,7 @@ function content(t: TestContext, options: {
   clearOnClick?: boolean;
   deferFirstInjection?: boolean;
   useGrokAdapter?: boolean;
+  loggedOut?: boolean;
 } = {}) {
   let now = 10000;
   let timerId = 0;
@@ -60,6 +61,7 @@ function content(t: TestContext, options: {
   let stopAvailable = false;
   let stopClicks = 0;
   let inputAvailable = options.inputAvailable ?? true;
+  let loggedOut = options.loggedOut ?? false;
   let thinking = options.initialThinking ?? false;
   let sendAvailable = options.sendAvailable ?? true;
   let releaseInjection: (() => void) | undefined;
@@ -151,6 +153,7 @@ function content(t: TestContext, options: {
     anchorSemanticResponsesAfterMatchingUserMessage: !options.single,
     inputFilter: () => true, sendButtonFilter: () => true, isThinking: () => thinking,
     loginDetector: () => true,
+    loggedOutDetector: () => loggedOut,
     injectInput: (editor: Textarea, text: string, isActive?: () => boolean) => {
       if (isActive) injectionGuards.push(isActive);
       injections++; editor.value = text;
@@ -174,6 +177,7 @@ function content(t: TestContext, options: {
       action: 'QUERY_PROVIDER_REQUEST_STATE', provider: 'grok', requestId, workflowId: 'workflow',
     }),
     inputReady() { inputAvailable = true; },
+    showLoginGate() { loggedOut = true; mutation(); },
     thinking(value: boolean) { thinking = value; },
     replaceComposer(draft = '') { input.isConnected = false; input = Object.assign(new Textarea(), { value: draft }); },
     clearComposer() { input.value = ''; },
@@ -585,4 +589,35 @@ test('unconfirmed Grok failure retains an exact scoped Stop for an orphan stream
   app.showStop();
   assert.equal((await app.stop()).ok, true);
   assert.equal(app.stopClicks(), 1);
+});
+
+test('settled input failure retains its structured reason for worker restart', async t => {
+  const app = content(t, { single: true, preserveExistingDraft: true, draft: 'user draft' });
+  await app.send();
+  const snapshot = await app.queryRequest();
+  assert.equal(snapshot.state, 'recoverable_failure');
+  assert.equal(snapshot.submission, 'not_submitted');
+  assert.equal(snapshot.response, app.done()[0].payload);
+  assert.match(snapshot.response, /error.existing_draft/);
+});
+
+test('an explicit login gate rejects Send before touching the editor', async t => {
+  const app = content(t, { loggedOut: true });
+  const ack = await app.send();
+  assert.equal(ack.ok, false);
+  assert.match(ack.error, /error.not_ready/);
+  await app.advance(30000);
+  assert.deepEqual(app.counts(), { clicks: 0, enters: 0, injections: 0 });
+});
+
+test('login gate after activation ends the request as authentication without resending', async t => {
+  const app = content(t);
+  await app.send();
+  await app.advance(800);
+  app.showLoginGate();
+  await app.advance(30000);
+  assert.equal(app.done().length, 1);
+  assert.match(app.done()[0].payload, /error.not_ready/);
+  assert.deepEqual(app.counts(), { clicks: 1, enters: 0, injections: 1 });
+  assert.equal((await app.queryRequest()).submission, 'uncertain');
 });

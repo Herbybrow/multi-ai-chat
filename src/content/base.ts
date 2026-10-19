@@ -78,6 +78,7 @@ interface SettledRequestIdentity {
   requestId?: string;
   workflowId?: string;
   dispatched: boolean;
+  reason?: string;
 }
 
 interface CancelledRequestCleanup extends SettledRequestIdentity {
@@ -259,9 +260,13 @@ export function createContentScript(config: ContentScriptConfig): void {
       cleanup();
       return;
     }
+    const explicitlyLoggedOut = loggedOutDetector();
+    if (explicitlyLoggedOut && waitingForResponse) {
+      finishWithError(encodeError('error.not_ready', { provider }));
+    }
     const decision = decideLoginStatus(loginStatusState, {
       ready: loginDetector(),
-      explicitlyLoggedOut: loggedOutDetector(),
+      explicitlyLoggedOut,
       now: Date.now(),
       lossDelayMs: loginLossDelay,
     });
@@ -282,6 +287,7 @@ export function createContentScript(config: ContentScriptConfig): void {
   async function sendMessage(text: string, requestId?: string, workflowId?: string): Promise<void> {
     if (!text.trim()) throw new Error(encodeError('error.empty_message'));
     if (waitingForResponse) throw new Error(encodeError('error.response_in_progress', { provider }));
+    if (loggedOutDetector()) throw new Error(encodeError('error.not_ready', { provider }));
     if (sendConfirmation === 'single-activation' && isThinking()) {
       throw new Error(encodeError('error.response_in_progress', { provider }));
     }
@@ -811,7 +817,7 @@ export function createContentScript(config: ContentScriptConfig): void {
       && requestId === activeRequestId
       && workflowId === activeWorkflowId;
     const failedRequest = settlesActiveRequest && (requestId !== undefined || workflowId !== undefined)
-      ? { requestId, workflowId, dispatched: sendDispatched }
+      ? { requestId, workflowId, dispatched: sendDispatched, reason }
       : undefined;
     const failureState: ProviderRequestState = reason.includes('error.existing_draft')
       ? 'existing_draft'
@@ -1020,6 +1026,7 @@ export function createContentScript(config: ContentScriptConfig): void {
         sendResponse({
           state: failedRequestTombstone.dispatched ? 'uncertain_submission' : 'recoverable_failure',
           submission,
+          ...(failedRequestTombstone.reason ? { response: `[Error: ${failedRequestTombstone.reason}]` } : {}),
         });
         return true;
       }

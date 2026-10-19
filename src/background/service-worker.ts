@@ -857,13 +857,13 @@ function relayProviderRequestState(message: ExtensionMessage, sender: chrome.run
   const state = payload.state;
   if (!shouldAcceptProviderState(waiter.providerState, state)) return;
   waiter.providerState = state;
-  waiter.submission = payload.submission;
-  void checkpointProviderState(message.requestId, state, payload.submission, waiter.documentId);
+  waiter.submission = preserveStrongestSubmissionEvidence(waiter.submission, payload.submission);
+  void checkpointProviderState(message.requestId, state, waiter.submission, waiter.documentId);
   void sendWorkflowDiagnostic({
     provider: waiter.provider,
     requestId: message.requestId,
     stage: `provider_${state}`,
-    submission: payload.submission,
+    submission: waiter.submission,
     ...sanitizeProviderRequestDiagnostics(payload.diagnostics),
   });
 }
@@ -1294,6 +1294,7 @@ async function reconcileCheckpointRequest(): Promise<void> {
     return;
   }
   const responsePromise = waitForResponse(current.provider, current.requestId, checkpoint.workflowId);
+  void responsePromise.catch(() => {});
   const waiter = responseWaiters.get(current.requestId);
   if (!waiter) return;
   waiter.tabId = connection.tabId;
@@ -1321,6 +1322,19 @@ async function reconcileCheckpointRequest(): Promise<void> {
   await checkpointProviderState(current.requestId, state, submission, documentId);
   if (state === 'response_complete' && typeof snapshot?.response === 'string' && snapshot.response.trim()) {
     resolveResumedResponse(current.requestId, snapshot.response);
+  } else if (['existing_draft', 'recoverable_failure', 'uncertain_submission', 'terminal_failure',
+    'rate_limited', 'temporarily_unavailable', 'not_ready'].includes(state)) {
+    // A settled content request will not emit another RESPONSE_DONE after the
+    // worker restarts. Recover from its saved error instead of waiting 10 minutes.
+    const savedError = typeof snapshot?.response === 'string' ? decodeError(snapshot.response) : null;
+    const reason = savedError ? encodeError(savedError.key, savedError.params)
+      : encodeError(state === 'not_ready' ? 'error.not_ready' : 'error.send_unconfirmed', { provider: current.provider });
+    rejectResponseWaiter(current.requestId, new Error(reason));
+    await responsePromise.catch(() => {});
+    await resolveCheckpointFailure(current, new ProviderRequestError(
+      current.provider, checkpoint.workflowId, current.requestId, new Error(reason), true, submission,
+    ));
+    return;
   } else if (state === 'idle') {
     rejectResponseWaiter(current.requestId, new Error(encodeError('error.send_unconfirmed', { provider: current.provider })));
     await responsePromise.catch(() => {});

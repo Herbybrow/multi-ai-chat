@@ -55,7 +55,7 @@ const RANK: Record<ProviderRequestState, number> = {
 };
 
 export function isProviderRequestState(value: unknown): value is ProviderRequestState {
-  return typeof value === 'string' && value in RANK;
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(RANK, value);
 }
 
 export function submissionEvidenceForState(state: ProviderRequestState): SubmissionEvidence {

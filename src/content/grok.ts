@@ -2,6 +2,7 @@ import { createContentScript } from './base';
 import {
   GROK_ANCHOR_RESPONSES_AFTER_MATCHING_USER_MESSAGE,
   GROK_INPUT_SELECTORS,
+  GROK_LOGGED_OUT_SELECTORS,
   GROK_REQUIRE_MATCHING_USER_MESSAGE_FOR_GENERATION_SIGNALS,
   GROK_REQUIRE_SAME_COMPOSER_FOR_CLEAR_CONFIRMATION,
   GROK_STOP_SELECTORS,
@@ -17,7 +18,8 @@ import {
 function isVisible(element: Element): boolean {
   if (!(element instanceof HTMLElement)) return true;
   const style = window.getComputedStyle(element);
-  return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+  return style.display !== 'none' && style.visibility !== 'hidden'
+    && !(style.opacity !== '' && Number(style.opacity) === 0) && element.getClientRects().length > 0;
 }
 
 function queryAll(selectors: readonly string[]): Element[] {
@@ -101,6 +103,7 @@ createContentScript({
     );
   },
   loginLossDelay: 2500,
+  loggedOutDetector: () => queryAll(GROK_LOGGED_OUT_SELECTORS).some(isVisible),
 
   isThinking: grokGenerationActive,
 

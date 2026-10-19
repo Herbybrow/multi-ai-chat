@@ -8,7 +8,7 @@ import ts from 'typescript';
 import { ALL_PROVIDERS, activeProviders, readyActiveTargets } from '../src/shared/providerSelection.ts';
 import { AI_PROVIDERS } from '../src/shared/constants.ts';
 import type { AIProvider, ConsultRoles, DebateRoles, RoundtableRoles } from '../src/shared/types.ts';
-import { decodeError } from '../src/shared/errors.ts';
+import { decodeError, encodeError } from '../src/shared/errors.ts';
 import { openUnreadyProviders } from '../src/sidepanel/openUnreadyProviders.ts';
 import { META_ORIGINS } from '../src/shared/metaOrigins.ts';
 
@@ -1921,3 +1921,52 @@ test('GET_CONNECTIONS for a different session does not rebind a live Meta debate
   })).ok, true);
   await running;
 });
+
+test('late failure evidence cannot make an accepted request safe to retry', async t => {
+  const app = worker({ standbyProvider: 'grok' }, false);
+  t.after(app.close);
+  await app.ready;
+  const running = app.send('roundtable', undefined, { roles: META_ROUNDTABLE });
+  await waitUntil(() => app.sent.length === 1, 'initial request');
+  const sent = app.sent[0];
+  const sender = { tab: { id: sent.tabId, url: AI_PROVIDERS.meta.url }, frameId: 0, documentId: sent.documentId };
+  for (const payload of [
+    { state: 'submission_accepted', submission: 'submitted' },
+    { state: 'recoverable_failure', submission: 'not_submitted' },
+  ]) app.receive({ action: 'PROVIDER_REQUEST_STATE', provider: 'meta', requestId: sent.requestId, workflowId: sent.workflowId, payload }, sender);
+  await flushWorkerTurns();
+  assert.equal((app.local.multiAiWorkflowCheckpoint as any).current.submission, 'submitted');
+  app.fail(sent, `[Error: ${encodeError('error.input_injection_failed', { provider: 'meta' })}]`);
+  await waitUntil(() => app.broadcasts.some(m => m.action === 'STEP_RECOVERY_REQUIRED'), 'recovery');
+  const recovery = app.broadcasts.find(m => m.action === 'STEP_RECOVERY_REQUIRED')!.payload;
+  assert.equal(recovery.retryAllowed, false);
+  assert.equal((await app.command({ action: 'RESOLVE_STEP_RECOVERY', payload: { ...recovery, action: 'retry' } })).ok, false);
+  await app.command({ action: 'RESOLVE_STEP_RECOVERY', payload: { ...recovery, action: 'cancel' } });
+  await running;
+  assert.equal(app.sent.length, 1);
+});
+
+for (const state of ['recoverable_failure', 'uncertain_submission']) {
+  test(`restart immediately recovers a settled ${state} snapshot`, async t => {
+    const first = worker({ standbyProvider: 'grok' }, false);
+    t.after(first.close);
+    await first.ready;
+    void first.send('roundtable', undefined, { roles: META_ROUNDTABLE }).catch(() => {});
+    await waitUntil(() => first.sent.length === 1, 'checkpoint');
+    const submission = state === 'uncertain_submission' ? 'uncertain' : 'not_submitted';
+    const reason = encodeError(state === 'uncertain_submission' ? 'error.send_unconfirmed' : 'error.existing_draft', { provider: 'meta' });
+    const second = worker(structuredClone(first.local), false, {}, [], {
+      session: { ...first.session }, resumeSnapshot: { state, submission, response: `[Error: ${reason}]` },
+    });
+    t.after(second.close);
+    await second.ready;
+    await second.command({ action: 'GET_CONNECTIONS', payload: { clientId: 'panel-2', sessionId: 'session' } });
+    await waitUntil(() => second.broadcasts.some(m => m.action === 'STEP_RECOVERY_REQUIRED'), 'settled failure recovery without timeout');
+    const recovery = second.broadcasts.find(m => m.action === 'STEP_RECOVERY_REQUIRED')!.payload;
+    assert.equal(recovery.reason, reason);
+    assert.equal(recovery.retryAllowed, submission === 'not_submitted');
+    assert.equal(second.pendingResponseCount(), 0);
+    assert.equal(second.sent.length, 0);
+    await second.command({ action: 'RESOLVE_STEP_RECOVERY', payload: { ...recovery, action: 'cancel' } });
+  });
+}
