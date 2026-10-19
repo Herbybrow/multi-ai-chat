@@ -35,11 +35,11 @@
     "tailwindcss": "^4.3.3",
     "ts-loader": "^9.6.2",
     "typescript": "^6.0.3",
-    "webpack": "^5.111.1",
+    "webpack": "^5.112.0",
     "webpack-cli": "^7.2.3"
   },
   "dependencies": {
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0"
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   }
 }

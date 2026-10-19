@@ -2,12 +2,14 @@ import { createContentScript } from './base';
 import {
   GROK_ANCHOR_RESPONSES_AFTER_MATCHING_USER_MESSAGE,
   GROK_INPUT_SELECTORS,
+  GROK_LOGGED_OUT_SELECTORS,
   GROK_REQUIRE_MATCHING_USER_MESSAGE_FOR_GENERATION_SIGNALS,
   GROK_REQUIRE_SAME_COMPOSER_FOR_CLEAR_CONFIRMATION,
   GROK_STOP_SELECTORS,
   isGrokComposerInput,
   isGrokGenerationActive,
   isGrokStopControl,
+  isGrokSendControl,
   grokResponseContentRoot,
   grokSessionReady,
   updateGrokTextControl,
@@ -16,7 +18,8 @@ import {
 function isVisible(element: Element): boolean {
   if (!(element instanceof HTMLElement)) return true;
   const style = window.getComputedStyle(element);
-  return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+  return style.display !== 'none' && style.visibility !== 'hidden'
+    && !(style.opacity !== '' && Number(style.opacity) === 0) && element.getClientRects().length > 0;
 }
 
 function queryAll(selectors: readonly string[]): Element[] {
@@ -60,6 +63,7 @@ createContentScript({
     'form button[type="submit"]',
     'button[type="submit"]',
   ],
+  sendButtonFilter: isGrokSendControl,
 
   userMessageSelectors: [
     '[data-testid="user-message"]',
@@ -67,6 +71,7 @@ createContentScript({
   // Retry sends the exact same prompt again. Count matching turns so a React remount of the
   // failed turn cannot masquerade as confirmation for the new attempt.
   userMessageTracking: 'semantic-count',
+  sendConfirmation: 'matching-user-message',
   requireSameComposerForClearConfirmation: GROK_REQUIRE_SAME_COMPOSER_FOR_CLEAR_CONFIRMATION,
 
   responseSelectors: [
@@ -98,6 +103,7 @@ createContentScript({
     );
   },
   loginLossDelay: 2500,
+  loggedOutDetector: () => queryAll(GROK_LOGGED_OUT_SELECTORS).some(isVisible),
 
   isThinking: grokGenerationActive,
 
