@@ -8,6 +8,11 @@ updates:
       time: "09:00"
       timezone: America/New_York
     open-pull-requests-limit: 5
+    groups:
+      react-runtime:
+        patterns:
+          - react
+          - react-dom
 
   - package-ecosystem: github-actions
     directory: /
