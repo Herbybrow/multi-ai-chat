@@ -1,8 +1,33 @@
 # Webchat 相容性與 PR 檢查
 
-檢查與修正日期：2026-10-19。四個 Dependabot PR 已合併；ChatGPT issue #76 的修正由 [PR 77](https://github.com/TED-H-com/multi-ai-chat/pull/77) 提供。PR 71 的側欄退步與瀏覽器 fixture 已修正並推回原分支，仍保留 draft。實際 webchat 收發中，Gemini 訪客模式通過，其他供應商的登入或驗證限制仍未排除。
+檢查與修正日期：2026-10-19。四個 Dependabot PR 已合併；ChatGPT issue #76 的修正由 [PR 77](https://github.com/TED-H-com/multi-ai-chat/pull/77) 提供。PR 71 的側欄、復原與登入阻擋修正及依賴更新已完成整合驗證，第二輪結果見下方。實際 webchat 收發中，Gemini 訪客模式通過，其他供應商的登入或驗證限制仍未排除。
 
-## 後續修正結果
+## 第二輪修補與整合
+
+本輪將 PR 71 的 provider／語言／復原修正與新依賴更新整合為同一候選。原始程式候選為 `aca69595cedeec91ab047924a7d6e1e323a49e8b`，後續僅補交接文件。PR 78 的 PostCSS 8.5.30 已獨立合併；PR 79 與 PR 81 的 React／React DOM 19.3.1 成對整合，並加入 Dependabot 分組；PR 80 的 Webpack 5.112.0 也已納入並重建 dist。三個原本失敗的依賴 CI，分別是 React 版本不一致及未提交新 bundle。
+
+本輪進一步重現並修正：
+
+- 已接受的送出，不能被晚到的失敗狀態降回 `not_submitted`，避免錯誤開放 Retry；背景 waiter、checkpoint 與診斷都保留最強送出證據。
+- Content script 保留已失敗請求的結構化原因。Worker 重啟讀到失敗快照時立即進入復原，不再等候不會再次出現的完成事件。
+- Provider state 僅接受自有欄位定義的狀態，排除 `constructor`／`__proto__`。
+- Grok 公開訪客實測確認 `anon-paywall-sign-up-card` 為註冊阻擋。可見卡片會回報 `error.not_ready` 並結束該次請求；隱藏／透明卡片與一般註冊連結不阻擋 Ready，送出後遇到登入阻擋也不自動重送。
+
+驗證結果：
+
+| 檢查 | 結果 |
+| --- | --- |
+| CI 同版 Node 22.18.0 | npm ci、audit 0 vulnerabilities、typecheck、450 tests、build、version 全通過；重建 dist 無差異 |
+| 整合版 Chromium | 五語 UI 100 組、ChatGPT 14 組、Gemini 12 組、Grok 5 組全部通過 |
+| Gemini 實際 unpacked extension | 新整合版訪客單次收發 PASS，收到精確測試回覆的 CHUNK 與 DONE |
+| Grok 實際 unpacked extension | 訪客送出後出現註冊卡片，修正後回報需要登入；不是成功收發 |
+| GitHub CI | Fork run 已核准；GitHub 官方於本輪公告 Actions／Pages／Webhooks 異常，workflow 仍在排隊 |
+
+[GitHub 官方事件紀錄](https://www.githubstatus.com/incidents/8tzbpcnl75jp)。本輪採用本機與 CI 同版 Node 的完整驗證；倉庫沒有 required status check／branch protection／ruleset，沒有變更任何保護設定。登入後五站工作流、Stop 與長回覆仍未實機驗證，未發布商店版本。
+
+本機證據位於 `.claude-memory/qa/maintenance-2026-10-19-round2/`：`node22-verify.log`、`final-ui/RESULTS.json`、`final-chatgpt.json`、`final-gemini.json`、`final-grok.json`、`live-gemini-final.json`、`live-smoke-after.json`。`recovery-before.log`／`resume-before.log` 與 `recovery-after.log` 保存復原問題的失敗與修正對照。以下保留第一輪紀錄供追查。
+
+## 第一輪修正結果
 
 - **ChatGPT Ready 與送出範圍**：加入 `form[data-chatgpt-composer]`，並接受表單中唯一可見的無標記 ProseMirror。排除訊息編輯框、dialog、search、navigation、disabled／inert 區域；若有多個候選則不猜測。Send／Stop 仍限制在對應 composer。Production bundle 的 14 組 Chromium 檢查通過，包含 Ready、真正觸發指定表單的送出按鈕，以及不觸發旁邊的 inline editor。這是 DOM fixture 驗證，沒有宣稱登入後 ChatGPT e2e 通過。
 - **PR 71 短視窗**：上方控制區改為可以縮小，保留單一捲動區；Send／Stop 不再被擠出視窗。五語共 **100 組** UI 檢查通過，新增驗證 40 筆 trace 全部保留、可捲到最後一筆，且 Stop 仍在畫面內。
