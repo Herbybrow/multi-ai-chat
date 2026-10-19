@@ -1,5 +1,7 @@
 # PR #42 收斂交接（2026-09-20）
 
+> 歷史紀錄，以下狀態截至 2026-09-20。PR #42 後來已合併，source 已升至 0.3.0；目前程式基準與遷移結果請先讀 [接手索引](../HANDOFF.md)。
+
 本輪程式已收斂並推送至 `feat/meta-ai-provider`，停在 **`e801019`**。
 [PR #42](https://github.com/TED-H-com/multi-ai-chat/pull/42) 維持 **DRAFT**；本交接文件是其後的文件提交，沒有再改程式。
 `READY_FOR_VM_REQC=yes` 表示可以交給 Conductor 重測，尚不代表完整 VM e2e 通過。
