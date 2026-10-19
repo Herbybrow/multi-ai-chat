@@ -1,8 +1,10 @@
 # Multi AI Chat 遷移與接手索引
 
-更新日期：2026-10-19。本 workspace 是 Chrome Side Panel extension，程式版本為 **0.3.0**。本次已同步 master、核對交接資料與封存改動；現有備份沒有需要直接套回這個 repo 的 patch。
+更新日期：2026-10-19。本 workspace 是 Chrome Side Panel extension，程式版本為 **0.4.0**。本次已同步 master、核對交接資料與封存改動；現有備份沒有需要直接套回這個 repo 的 patch。
 
-後續已完成 [2026-10-19 issues、PR 與 webchat 測試](store/WEBCHAT-QC-2026-10-19.zh-TW.md)：ChatGPT 修正由 PR 77 提供；PR 71 已完成短視窗、復原與 Grok 登入阻擋修正，並整合 React／React DOM、Webpack、PostCSS 更新。Node 22 的 450 項測試與五語 100 組 UI 檢查通過，新版 Gemini 訪客收發也通過。GitHub CI 受官方服務異常影響仍排隊；合併依據與範圍見報告。其他 provider 的限制與實測範圍見報告。
+後續已完成 [2026-10-19 issues、PR 與 webchat 測試](store/WEBCHAT-QC-2026-10-19.zh-TW.md)：ChatGPT 修正由 PR 77 提供；PR 71 已完成短視窗、復原與 Grok 登入阻擋修正，並整合 React／React DOM、Webpack、PostCSS 更新。Node 22 的 450 項測試與五語 100 組 UI 檢查通過，新版 Gemini 訪客收發也通過。先前排隊的 GitHub CI／CodeQL 已全部通過；其他 provider 的限制與實測範圍見報告。
+
+[v0.4.0 已在 GitHub 發布](https://github.com/TED-H-com/multi-ai-chat/releases/tag/v0.4.0)，發布 commit 為 `2dc49c31009f5f5db22505a24880560de4196215`，升版 PR 82 的 CI／CodeQL 通過。ZIP 與 checksum 已下載回驗，runtime bundles 與已驗證候選相同。Chrome Web Store [自動送審流程](https://github.com/TED-H-com/multi-ai-chat/actions/runs/39303848603)已啟動，需經既有 environment 人工核准後才會上傳及送審；不能把 GitHub 發布當成商店已上架。詳見[發布說明](store/RELEASE-v0.4.0.md)。
 
 ## 目前程式基準
 
