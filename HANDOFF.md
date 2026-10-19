@@ -2,7 +2,7 @@
 
 更新日期：2026-10-19。本 workspace 是 Chrome Side Panel extension，程式版本為 **0.3.0**。本次已同步 master、核對交接資料與封存改動；現有備份沒有需要直接套回這個 repo 的 patch。
 
-後續已完成 [2026-10-19 issues、PR 與 webchat 測試](store/WEBCHAT-QC-2026-10-19.zh-TW.md)：優先處理 issue 76，PR 71 有瀏覽器檢查失敗；四個依賴 PR 的組合候選通過，Gemini 訪客收發通過。其他 provider 的限制與實測範圍見報告。
+後續已完成 [2026-10-19 issues、PR 與 webchat 測試](store/WEBCHAT-QC-2026-10-19.zh-TW.md)：ChatGPT 修正由 PR 77 提供；PR 71 的短視窗與 fixture 修正已推回原分支，五語 100 組 UI 檢查通過，仍維持 draft。四個依賴 PR 已合併，Gemini 訪客收發通過。其他 provider 的限制與實測範圍見報告。
 
 ## 目前程式基準
 

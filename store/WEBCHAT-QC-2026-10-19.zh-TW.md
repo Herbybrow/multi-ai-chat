@@ -1,8 +1,24 @@
 # Webchat 相容性與 PR 檢查
 
-檢查日期：2026-10-19。優先處理 ChatGPT issue #76；draft PR #71 有可重現的側欄退步，暫不適合合併。四個 Dependabot PR 的組合候選通過測試。實際 webchat 收發中，Gemini 訪客模式通過，其他供應商的登入或驗證限制仍未排除。
+檢查與修正日期：2026-10-19。四個 Dependabot PR 已合併；ChatGPT issue #76 的修正由 [PR 77](https://github.com/TED-H-com/multi-ai-chat/pull/77) 提供。PR 71 的側欄退步與瀏覽器 fixture 已修正並推回原分支，仍保留 draft。實際 webchat 收發中，Gemini 訪客模式通過，其他供應商的登入或驗證限制仍未排除。
 
-## GitHub 項目與處理建議
+## 後續修正結果
+
+- **ChatGPT Ready 與送出範圍**：加入 `form[data-chatgpt-composer]`，並接受表單中唯一可見的無標記 ProseMirror。排除訊息編輯框、dialog、search、navigation、disabled／inert 區域；若有多個候選則不猜測。Send／Stop 仍限制在對應 composer。Production bundle 的 14 組 Chromium 檢查通過，包含 Ready、真正觸發指定表單的送出按鈕，以及不觸發旁邊的 inline editor。這是 DOM fixture 驗證，沒有宣稱登入後 ChatGPT e2e 通過。
+- **PR 71 短視窗**：上方控制區改為可以縮小，保留單一捲動區；Send／Stop 不再被擠出視窗。五語共 **100 組** UI 檢查通過，新增驗證 40 筆 trace 全部保留、可捲到最後一筆，且 Stop 仍在畫面內。
+- **Gemini fixture**：以 microtask 明確安排送出前回滾，另設送出後回滾案例，移除依賴 80 ms 的競賽。**12 種情境全部通過**；未為了 fixture 延遲產品送出。UI fixture 亦更新 Tab 順序，納入 PR 新增的復原設定並確認跳過停用的控制項。
+- **依賴 PR 72–75**：已逐一以原 head SHA 合併，沒有跳過 checks；整合後 master `dced784` 的 CI 通過。
+
+| 修正候選 | 完整 verify | Chromium 驗證 |
+| --- | --- | --- |
+| PR 77 runtime `dee8dd9` | 241 tests、typecheck、build、version 通過；GitHub Node 22.18.0 Verify 與 CodeQL 通過 | ChatGPT 14 組通過 |
+| PR 71 `17768fc7645c3de4c5ba82379147e8f9cbe2dc1d` | 444 tests、typecheck、build、version 通過 | 五語 UI 100 組、ChatGPT 14 組、Gemini 12 組通過 |
+
+PR 71 的修正以一般 fast-forward push 更新原作者允許 maintainer 修改的分支，沒有 force-push。未合併整個大型 draft，未觸發 Chrome Web Store 發布。Grok 訪客註冊頁仍會得到 `input disappeared`，這個錯誤分類尚未修改；登入後五站的收發、Stop、長回覆與跨 provider 工作流仍待可用的已登入測試環境。
+
+最新證據：`fix-verify.log`、`fix-chatgpt.json`、`pr71-fix-verify.log`、`pr71-fixed-ui/RESULTS.json`、`pr71-fixed-chatgpt.json`、`pr71-fixed-gemini.json`，皆位於本文末的本機證據目錄。下列原始盤點與失敗案例保留作為修正前對照。
+
+## 原始 GitHub 盤點與處理建議
 
 | 項目 | 檢查結果 | 建議 |
 | --- | --- | --- |
@@ -13,7 +29,7 @@
 | [PR 74](https://github.com/TED-H-com/multi-ai-chat/pull/74) | `actions/setup-node` 7.0.0 → 7.1.0，維持 SHA pin | 可列入下一批依賴合併 |
 | [PR 75](https://github.com/TED-H-com/multi-ai-chat/pull/75) | `actions/upload-artifact` 7.0.1 → 7.0.2，維持 SHA pin | 可列入下一批依賴合併 |
 
-PR 72–75 的 GitHub Verify 均為 SUCCESS，CodeQL 為 NEUTRAL。四個 PR 在隔離 worktree 可無衝突整合；本機組合驗證通過，`dist/` 與 master 逐檔 SHA-256 相同。這是合併建議，本輪沒有合併遠端 PR、關閉 issue、留言或發布版本。
+PR 72–75 的 GitHub Verify 均為 SUCCESS，CodeQL 為 NEUTRAL。四個 PR 在隔離 worktree 可無衝突整合；本機組合驗證通過，`dist/` 與 master 逐檔 SHA-256 相同。這是初次盤點時的合併建議；後續處理結果見上方。
 
 ## 已重現的問題
 
@@ -85,6 +101,6 @@ Build 只有既有的 webpack bundle size warnings。Panel 文件載入與 Chrom
 
 本機證據根目錄為 `.claude-memory/qa/maintenance-2026-10-19/`，受 Git ignore 保護，不隨 clone 傳遞。`review-manifest.json` 記錄所有已測 PR 的完整 SHA、工具版本與 dist hashes；`issues.json`、`prs.json` 保存盤點快照。`browser-audit.cjs` 與 `live-smoke.cjs` 保留這次本機探測流程，後者會向訪客頁送出固定測試 prompt。
 
-測試用 worktree 已清理，diff 與結果仍保留。要重跑 PR 71 的檢查，先以 `git worktree add --detach .claude-memory/qa/maintenance-2026-10-19/pr71 3b110903da18cb48f92c102a6ae4340a6f69e145` 恢復該候選並在其中執行 `npm ci`；瀏覽器腳本的 `PLAYWRIGHT_MODULE` 指向證據目錄下 `browser-tools/node_modules/playwright`，`READINESS_BROWSER` 或 `GEMINI_BROWSER` 指向此機 Chromium executable。
+初次盤點的測試 worktree 曾清理；後續修正 worktree 位於同一路徑，使用前先檢查 `git worktree list`。若要另外重現修正前 PR 71，請以不同空目錄建立 worktree，原指令為 `git worktree add --detach .claude-memory/qa/maintenance-2026-10-19/pr71 3b110903da18cb48f92c102a6ae4340a6f69e145` 恢復該候選並在其中執行 `npm ci`；瀏覽器腳本的 `PLAYWRIGHT_MODULE` 指向證據目錄下 `browser-tools/node_modules/playwright`，`READINESS_BROWSER` 或 `GEMINI_BROWSER` 指向此機 Chromium executable。
 
-處理順序：先修 ChatGPT Ready 問題與 PR 71 的 Send 可見性，再校正 Gemini fixture，最後用已登入 Chrome 補齊五家收發、Stop、長回覆與跨 provider 工作流。四個依賴 PR 可以獨立處理，不必等待整個 draft PR 71 收斂。
+後續仍需用已登入 Chrome 補齊五家收發、Stop、長回覆與跨 provider 工作流，並改善 Grok 註冊阻擋的錯誤分類。ChatGPT Ready、短視窗版面與 Gemini fixture 已完成上述修正；四個依賴 PR 已合併。
